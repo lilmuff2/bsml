@@ -1,9 +1,10 @@
 package lilmuff1.bsml.service
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
+import lilmuff1.bsml.config.*
+import lilmuff1.bsml.protocol.debugLog
+import lilmuff1.bsml.state.VpnLogRepository
+import lilmuff1.bsml.vpn.*
+
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -11,7 +12,6 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
-import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -20,21 +20,6 @@ import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
-import lilmuff1.bsml.R
-import lilmuff1.bsml.logging.VpnLogRepository
-import lilmuff1.bsml.ui.MainActivity
-import lilmuff1.bsml.vpn.PacketEvent
-import lilmuff1.bsml.vpn.PacketParser
-import lilmuff1.bsml.vpn.SessionKey
-import lilmuff1.bsml.vpn.TCP_ACK
-import lilmuff1.bsml.vpn.TCP_FIN
-import lilmuff1.bsml.vpn.TCP_RST
-import lilmuff1.bsml.vpn.TCP_SYN
-import lilmuff1.bsml.vpn.TcpPacketBuilder
-import lilmuff1.bsml.vpn.TcpProxySession
-import lilmuff1.bsml.vpn.VpnRelayConfig
-import lilmuff1.bsml.vpn.debugLog
-import lilmuff1.bsml.vpn.ipv4BytesToInt
 
 class LocalVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -42,6 +27,13 @@ class LocalVpnService : VpnService() {
     private var starterThread: Thread? = null
     private var tunOutput: FileOutputStream? = null
     private val proxyState = ProxyState()
+    private val loginFailedRewriter by lazy {
+        LoginFailedRewriter(filesDir) { path ->
+            runCatching {
+                assets.open("patches/$path").use { input -> input.readBytes() }
+            }.getOrNull()
+        }
+    }
 
     @Volatile
     private var active = false
@@ -49,11 +41,28 @@ class LocalVpnService : VpnService() {
     @Volatile
     private var starting = false
 
+    @Volatile
+    private var interceptionDisabled = false
+
+    @Volatile
+    private var loginFailedRewriteDone = false
+
+    @Volatile
+    private var originalRootAfterPatchSeen = false
+
+    @Volatile
+    private var finalOriginalClientHelloHandled = false
+
+    @Volatile
+    private var contentHashRewriteEnabled = false
+
+    @Volatile
+    private var originalAssetRootSha: String? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             when (intent?.action) {
                 ACTION_STOP -> stopVpn()
-                ACTION_STOP_AFTER_ASSET -> stopVpn()
                 ACTION_START, null -> startVpn()
             }
         } catch (error: Throwable) {
@@ -71,14 +80,28 @@ class LocalVpnService : VpnService() {
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     private fun startVpn() {
-        if (active || starting) return
+        if (active || starting) {
+            debugLog("VPN already running")
+            return
+        }
 
         starting = true
+        interceptionDisabled = false
+        loginFailedRewriteDone = false
+        originalRootAfterPatchSeen = false
+        finalOriginalClientHelloHandled = false
+        contentHashRewriteEnabled = true
+        originalAssetRootSha = null
         VpnLogRepository.setStatus("Starting VPN...")
+        VpnLogRepository.log("VPN start requested; contentHash rewrite enabled")
 
-        val notification = buildNotification("TCP proxy is starting")
+        val notification = VpnNotificationFactory.build(this, "TCP proxy is starting")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -87,6 +110,7 @@ class LocalVpnService : VpnService() {
             try {
                 val targetAddresses = resolveTargetAddresses()
                 if (targetAddresses.isEmpty()) {
+                    VpnLogRepository.log("VPN resolve failed for $GAME_HOST")
                     VpnLogRepository.setStatus("Resolve failed")
                     stopVpn()
                     return@thread
@@ -94,9 +118,9 @@ class LocalVpnService : VpnService() {
 
                 val builder = Builder()
                     .setSession("BSML Local VPN")
-                    .setMtu(VpnRelayConfig.MTU)
+                    .setMtu(MTU)
                     .setBlocking(true)
-                    .addAddress(VpnRelayConfig.TUN_ADDRESS, 32)
+                    .addAddress(TUN_ADDRESS, 32)
 
                 targetAddresses.forEach { address ->
                     builder.addRoute(address.hostAddress ?: return@forEach, 32)
@@ -105,6 +129,7 @@ class LocalVpnService : VpnService() {
                 vpnInterface = builder.establish()
                 val descriptor = vpnInterface
                 if (descriptor == null) {
+                    debugLog("Builder.establish() returned null")
                     VpnLogRepository.setStatus("VPN establish failed")
                     stopVpn()
                     return@thread
@@ -113,7 +138,8 @@ class LocalVpnService : VpnService() {
                 tunOutput = FileOutputStream(descriptor.fileDescriptor)
                 active = true
                 VpnLogRepository.setRunning(true)
-                VpnLogRepository.setStatus("Listening on ${VpnRelayConfig.TARGET_HOST}:${VpnRelayConfig.TARGET_PORT}")
+                VpnLogRepository.setStatus("Listening on $GAME_HOST:$GAME_PORT")
+                VpnLogRepository.log("VPN established for ${targetAddresses.joinToString { it.hostAddress ?: "?" }}")
 
                 val targetIpInts = targetAddresses.map { ipv4BytesToInt(it.address) }.toSet()
                 readerThread = thread(name = "bsml-vpn-reader", start = true) {
@@ -139,6 +165,7 @@ class LocalVpnService : VpnService() {
         readerThread = null
         starterThread?.interrupt()
         starterThread = null
+
         proxyState.close()
 
         try {
@@ -155,6 +182,32 @@ class LocalVpnService : VpnService() {
 
         VpnLogRepository.setRunning(false)
         VpnLogRepository.setStatus("Stopped")
+        debugLog("VPN stopped")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun disableVpnTunnelKeepService() {
+        interceptionDisabled = true
+        proxyState.close()
+        active = false
+        starting = false
+        readerThread?.interrupt()
+        readerThread = null
+        starterThread?.interrupt()
+        starterThread = null
+        try {
+            tunOutput?.close()
+        } catch (_: IOException) {
+        }
+        tunOutput = null
+        try {
+            vpnInterface?.close()
+        } catch (_: IOException) {
+        }
+        vpnInterface = null
+        VpnLogRepository.setRunning(false)
+        VpnLogRepository.setStatus("Asset proxy active")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -164,12 +217,18 @@ class LocalVpnService : VpnService() {
 
         try {
             FileInputStream(descriptor.fileDescriptor).use { input ->
-                val packet = ByteArray(VpnRelayConfig.MTU)
+                val packet = ByteArray(MTU)
                 while (active && !Thread.currentThread().isInterrupted) {
                     val length = input.read(packet)
                     if (length <= 0) continue
 
                     val event = PacketParser.parse(packet, length, targetIpInts) ?: continue
+                    if (event.protocol != "TCP") {
+                        continue
+                    }
+                    if (interceptionDisabled) {
+                        continue
+                    }
                     try {
                         handleTcpPacket(event)
                     } catch (error: Throwable) {
@@ -185,20 +244,24 @@ class LocalVpnService : VpnService() {
         } catch (error: Throwable) {
             VpnLogRepository.log("FATAL readLoop ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
         } finally {
-            if (active) stopVpn()
+            if (active) {
+                stopVpn()
+            }
         }
     }
 
     private fun handleTcpPacket(event: PacketEvent) {
-        if (event.destinationPort != VpnRelayConfig.TARGET_PORT && event.sourcePort != VpnRelayConfig.TARGET_PORT) {
+        if (event.destinationPort != GAME_PORT && event.sourcePort != GAME_PORT) {
             return
         }
 
         val flags = event.tcpFlags
         val clientPayload = event.payload()
 
-        if (flags and TCP_SYN != 0 && event.destinationPort == VpnRelayConfig.TARGET_PORT) {
+        if (flags and TCP_SYN != 0 && event.destinationPort == GAME_PORT) {
+            debugLog("TCP SYN ${event.sourceIp}:${event.sourcePort} -> ${event.destinationIp}:${event.destinationPort}")
             if (!proxyState.tryStartSession(event)) {
+                debugLog("Reject extra SYN ${event.sourcePort}, active session is already running")
                 sendStandaloneReset(event)
             }
             return
@@ -208,11 +271,16 @@ class LocalVpnService : VpnService() {
         if (!session.matches(event)) return
 
         if (flags and TCP_RST != 0) {
+            debugLog("TCP RST from client")
             session.close()
             return
         }
 
         if (flags and TCP_ACK != 0) {
+            debugLog(
+                "Client ACK seq=${event.sequenceNumber} ack=${event.ackNumber} " +
+                    "payload=${clientPayload.size} flags=${tcpFlagsToString(flags)} port=${event.sourcePort}"
+            )
             session.onClientAck(event.ackNumber)
         }
 
@@ -226,13 +294,43 @@ class LocalVpnService : VpnService() {
     }
 
     private fun resolveTargetAddresses(): List<Inet4Address> {
-        return try {
-            InetAddress.getAllByName(VpnRelayConfig.TARGET_HOST)
-                .filterIsInstance<Inet4Address>()
-                .distinctBy { it.hostAddress }
-        } catch (_: IOException) {
-            emptyList()
+        var lastError: Throwable? = null
+        repeat(DNS_RESOLVE_ATTEMPTS) { index ->
+            val attempt = index + 1
+            try {
+                val addresses = InetAddress.getAllByName(GAME_HOST)
+                    .filterIsInstance<Inet4Address>()
+                    .distinctBy { it.hostAddress }
+                if (addresses.isNotEmpty()) {
+                    VpnLogRepository.log(
+                        "VPN resolved $GAME_HOST attempt=$attempt ips=${addresses.joinToString { it.hostAddress ?: "?" }}"
+                    )
+                    return addresses
+                }
+                VpnLogRepository.log("VPN resolve empty $GAME_HOST attempt=$attempt")
+            } catch (error: IOException) {
+                lastError = error
+                VpnLogRepository.log(
+                    "VPN resolve attempt=$attempt failed ${error::class.java.simpleName}: ${error.message ?: "unknown"}"
+                )
+            }
+
+            if (attempt < DNS_RESOLVE_ATTEMPTS) {
+                try {
+                    Thread.sleep(DNS_RESOLVE_RETRY_DELAY_MS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return emptyList()
+                }
+            }
         }
+
+        lastError?.let { error ->
+            VpnLogRepository.log(
+                "VPN resolve failed final ${error::class.java.simpleName}: ${error.message ?: "unknown"}"
+            )
+        }
+        return emptyList()
     }
 
     private fun sendToTun(bytes: ByteArray) {
@@ -259,36 +357,88 @@ class LocalVpnService : VpnService() {
         sendToTun(packet)
     }
 
-    private fun buildNotification(contentText: String): Notification {
-        createNotificationChannel()
+    private fun createSessionCallbacks(): TcpProxySessionCallbacks {
+        return object : TcpProxySessionCallbacks {
+            override fun protectSocket(socket: Socket): Boolean = protect(socket)
 
-        val openAppIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+            override fun sendToTun(packet: ByteArray) {
+                this@LocalVpnService.sendToTun(packet)
+            }
 
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("BSML Local VPN")
-            .setContentText(contentText)
-            .setContentIntent(openAppIntent)
-            .setOngoing(true)
-            .build()
+            override fun removeSession(key: SessionKey) {
+                proxyState.remove(key)
+            }
+
+            override fun shouldRewriteContentHash(): Boolean = contentHashRewriteEnabled
+
+            override fun onFinalOriginalClientHello(contentHash: String) {
+                handleFinalOriginalClientHello(contentHash)
+            }
+
+            override fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult {
+                return this@LocalVpnService.rewriteLoginFailedBody(body)
+            }
+        }
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-
-        val manager = getSystemService(NotificationManager::class.java) ?: return
-        manager.createNotificationChannel(
-            NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "BSML Local VPN",
-                NotificationManager.IMPORTANCE_LOW
+    private fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult {
+        val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED && !loginFailedRewriteDone
+        val result = loginFailedRewriter.rewrite(body, shouldPatchRootFingerprintSha)
+        if (result.assetUrlRewritten && contentHashRewriteEnabled) {
+            contentHashRewriteEnabled = false
+        }
+        if (result.assetOrigins.isNotEmpty()) {
+            startService(
+                Intent(this, AssetProxyService::class.java)
+                    .setAction(AssetProxyService.ACTION_UPDATE_ORIGINS)
+                    .putExtra(AssetProxyService.EXTRA_ORIGINAL_ROOT_SHA, result.originalRootSha)
+                    .putStringArrayListExtra(
+                        AssetProxyService.EXTRA_ORIGINS,
+                        ArrayList(result.assetOrigins)
+                    )
             )
-        )
+        }
+        if (result.originalRootSha != null) {
+            originalAssetRootSha = result.originalRootSha
+        }
+        handleOriginalRootAfterPatch(result.hashes.rootSha)
+        if (result.rootShaRewriteApplied) {
+            loginFailedRewriteDone = true
+        }
+        return result
+    }
+
+    private fun handleOriginalRootAfterPatch(rootSha: String?) {
+        val originalRootSha = originalAssetRootSha ?: return
+        if (
+            !loginFailedRewriteDone ||
+            originalRootAfterPatchSeen ||
+            rootSha != originalRootSha
+        ) {
+            return
+        }
+        originalRootAfterPatchSeen = true
+    }
+
+    private fun handleFinalOriginalClientHello(contentHash: String) {
+        val originalRootSha = originalAssetRootSha ?: return
+        if (
+            !originalRootAfterPatchSeen ||
+            finalOriginalClientHelloHandled ||
+            contentHash != originalRootSha
+        ) {
+            return
+        }
+        finalOriginalClientHelloHandled = true
+        if (VpnLogRepository.isAutoVpnDisableEnabledNow()) {
+            VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; VPN interception disabled")
+            thread(name = "bsml-disable-after-original-root", start = true) {
+                Thread.sleep(500)
+                disableVpnTunnelKeepService()
+            }
+        } else {
+            VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; auto VPN disable is off")
+        }
     }
 
     private inner class ProxyState {
@@ -311,14 +461,18 @@ class LocalVpnService : VpnService() {
                 key = key,
                 clientInitialSeq = syn.sequenceNumber,
                 clientWindow = syn.windowSize,
-                protectSocket = { socket: Socket -> protect(socket) },
-                sendToTun = ::sendToTun,
-                onClosed = { closedKey -> sessions.remove(closedKey) }
+                callbacks = createSessionCallbacks()
             ).also { it.start() }
             return true
         }
 
-        fun find(event: PacketEvent): TcpProxySession? = sessions[SessionKey.fromEvent(event)]
+        fun find(event: PacketEvent): TcpProxySession? {
+            return sessions[SessionKey.fromEvent(event)]
+        }
+
+        fun remove(key: SessionKey) {
+            sessions.remove(key)
+        }
 
         fun close() {
             sessions.values.forEach { it.close() }
@@ -329,9 +483,18 @@ class LocalVpnService : VpnService() {
     companion object {
         const val ACTION_START = "lilmuff1.bsml.action.START_VPN"
         const val ACTION_STOP = "lilmuff1.bsml.action.STOP_VPN"
-        const val ACTION_STOP_AFTER_ASSET = "lilmuff1.bsml.action.STOP_VPN_AFTER_ASSET"
 
-        private const val NOTIFICATION_CHANNEL_ID = "bsml_local_vpn"
+        private const val MTU = 32767
+        private const val TUN_ADDRESS = "10.10.10.2"
         private const val NOTIFICATION_ID = 1001
+        private const val SOCKET_CONNECT_TIMEOUT_MS = 10_000
+        private const val SOCKET_READ_TIMEOUT_MS = 15_000
+        private const val SOCKET_WRITE_TIMEOUT_MS = 5_000
+        private const val DNS_RESOLVE_ATTEMPTS = 5
+        private const val DNS_RESOLVE_RETRY_DELAY_MS = 1_000L
+        private const val MAX_TCP_PAYLOAD = 1400
+        private const val CLIENT_HELLO_ID = 10100
+        private const val LOGIN_FAILED_ID = 0x4E87
+        private const val ROOT_SHA_REWRITE_ENABLED = true
     }
 }

@@ -1,9 +1,18 @@
 package lilmuff1.bsml.protocol
 
-import lilmuff1.bsml.logging.VpnLogRepository
-import lilmuff1.bsml.vpn.debugLog
+import lilmuff1.bsml.state.VpnLogRepository
 
-class SupercellStreamParser {
+class SupercellStreamParser(
+    private val onEncryptedStageReached: () -> Unit,
+    private val localhostAssetBaseUrl: String
+) {
+    companion object {
+        private const val CLIENT_HELLO = 10100
+        private const val LOGIN = 10101
+        private const val SERVER_HELLO = 20100
+        private const val LOGIN_FAILED = 0x4E87
+    }
+
     private val clientBuffer = ByteQueue()
     private val serverBuffer = ByteQueue()
 
@@ -17,15 +26,7 @@ class SupercellStreamParser {
 
     private fun safelyParse(direction: String, queue: ByteQueue, bytes: ByteArray) {
         try {
-            appendAndParse(direction, queue)
-            queue.append(bytes)
-        } catch (error: Throwable) {
-            VpnLogRepository.log(
-                "SC $direction parserError=${error::class.java.simpleName}: ${error.message ?: "unknown"}"
-            )
-        }
-        try {
-            appendAndParse(direction, queue)
+            appendAndParse(direction, queue, bytes)
         } catch (error: Throwable) {
             VpnLogRepository.log(
                 "SC $direction parserError=${error::class.java.simpleName}: ${error.message ?: "unknown"}"
@@ -33,23 +34,26 @@ class SupercellStreamParser {
         }
     }
 
-    private fun appendAndParse(direction: String, queue: ByteQueue) {
-        while (queue.size >= SupercellConstants.HEADER_SIZE) {
-            val header = queue.peek(SupercellConstants.HEADER_SIZE)
+    private fun appendAndParse(direction: String, queue: ByteQueue, bytes: ByteArray) {
+        queue.append(bytes)
+        while (queue.size >= SUPERCELL_HEADER_SIZE) {
+            val header = queue.peek(SUPERCELL_HEADER_SIZE)
             val messageId = readUInt16(header, 0)
             val payloadLength = readUInt24(header, 2)
-            val version = readUInt16(header, 5)
-            val fullLength = SupercellConstants.HEADER_SIZE + payloadLength
+            val fullLength = SUPERCELL_HEADER_SIZE + payloadLength
             if (queue.size < fullLength) {
                 debugLog("SC $direction waiting id=$messageId need=$fullLength have=${queue.size}")
                 return
             }
 
-            queue.skip(SupercellConstants.HEADER_SIZE)
-            val body = queue.read(payloadLength)
-            VpnLogRepository.log("SC $direction id=$messageId len=$payloadLength ver=$version")
-            if (messageId == SupercellConstants.CLIENT_HELLO) {
-                ClientHelloMessage.parse(body)?.let { VpnLogRepository.log(it.toLogString()) }
+            queue.skip(SUPERCELL_HEADER_SIZE)
+            queue.read(payloadLength)
+            when (messageId) {
+                CLIENT_HELLO -> {}
+                LOGIN -> {}
+                SERVER_HELLO -> {}
+                LOGIN_FAILED -> onEncryptedStageReached()
+                else -> {}
             }
         }
     }

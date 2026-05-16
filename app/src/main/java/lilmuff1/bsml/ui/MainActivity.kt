@@ -10,12 +10,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -24,11 +29,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import lilmuff1.bsml.logging.VpnLogRepository
 import lilmuff1.bsml.service.AssetProxyService
 import lilmuff1.bsml.service.LocalVpnService
+import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.ui.theme.BSMLTheme
 
 class MainActivity : ComponentActivity() {
@@ -48,6 +54,7 @@ private fun MainScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val isVpnRunning by VpnLogRepository.isRunning.collectAsState()
     val isAssetProxyRunning by VpnLogRepository.isAssetProxyRunning.collectAsState()
+    val isAutoVpnDisableEnabled by VpnLogRepository.isAutoVpnDisableEnabled.collectAsState()
     val isRunning = isVpnRunning || isAssetProxyRunning
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
@@ -62,12 +69,27 @@ private fun MainScreen() {
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentAlignment = Alignment.Center
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Авто выключение VPN",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = isAutoVpnDisableEnabled,
+                    onCheckedChange = VpnLogRepository::setAutoVpnDisableEnabled
+                )
+            }
+            androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(24.dp))
             Button(
                 onClick = {
                     if (isRunning) {

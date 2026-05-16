@@ -10,9 +10,15 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import kotlin.concurrent.thread
+import lilmuff1.bsml.config.LOCAL_ASSET_HOST
+import lilmuff1.bsml.config.LOCAL_ASSET_PORT
+import lilmuff1.bsml.config.PATCHED_ASSET_PATH
+import lilmuff1.bsml.config.PATCH_NAMESPACE
+import lilmuff1.bsml.config.localAssetBaseUrl
 
 class LocalAssetProxyServer(
     private val onLog: (String) -> Unit,
+    private val openPatchedAsset: (String) -> ByteArray?,
     private val onFirstAssetRequest: () -> Unit
 ) {
     private var serverSocket: ServerSocket? = null
@@ -24,15 +30,28 @@ class LocalAssetProxyServer(
     @Volatile
     private var firstAssetRequestSeen = false
 
+    @Volatile
+    private var origins: List<String> = emptyList()
+
+    @Volatile
+    private var originalRootSha: String? = null
+
+    fun setRouting(newOrigins: List<String>, newOriginalRootSha: String?) {
+        origins = newOrigins
+            .map { it.trim().trimEnd('/') }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        originalRootSha = newOriginalRootSha?.takeIf { it.isNotBlank() }
+        onLog("ASSET routing updated origins=${origins.size} rootSha=${originalRootSha ?: "<unknown>"}")
+    }
+
     fun start() {
         if (running) return
-
         val socket = ServerSocket()
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress("127.0.0.1", AssetProxyConfig.PORT))
+        socket.bind(InetSocketAddress(LOCAL_ASSET_HOST, LOCAL_ASSET_PORT))
         serverSocket = socket
         running = true
-
         acceptThread = thread(name = "bsml-asset-proxy-accept", start = true) {
             while (running) {
                 try {
@@ -70,16 +89,15 @@ class LocalAssetProxyServer(
                         writeSimpleResponse(output, 400, "Bad Request")
                         return
                     }
-
                     val method = parts[0]
                     val path = parts[1]
                     val headers = readHeaders(input)
+                    val assetPath = normalizeAssetPath(path.substringBefore('?'))
                     if (!firstAssetRequestSeen) {
                         firstAssetRequestSeen = true
                         onFirstAssetRequest()
                     }
-                    onLog("ASSET $method $path")
-                    proxyToOrigin(method, path, headers, output)
+                    handleAssetRequest(method, path, assetPath, headers, output)
                 }
             }
         } catch (error: Throwable) {
@@ -92,23 +110,39 @@ class LocalAssetProxyServer(
         }
     }
 
-    private fun proxyToOrigin(
+    private fun handleAssetRequest(
         method: String,
         path: String,
+        assetPath: String,
         headers: Map<String, String>,
         output: BufferedOutputStream
     ) {
-        val origins = listOf(
-            AssetProxyConfig.PRIMARY_ASSET_BASE_ORIGIN,
-            AssetProxyConfig.SECONDARY_ASSET_BASE_ORIGIN
-        )
+        val patchedAsset = openPatchedAsset(assetPath)
+        if (patchedAsset != null) {
+            onLog("ASSET $method $path normalized=$assetPath result=patched bytes=${patchedAsset.size}")
+            writePatchedAssetResponse(method, assetPath, patchedAsset, output)
+            return
+        }
+
+        val originsSnapshot = origins
+        if (originsSnapshot.isEmpty()) {
+            onLog("ASSET $method $path normalized=$assetPath result=no-origin")
+            writeSimpleResponse(output, 502, "No Origin")
+            return
+        }
 
         var successfulConnection: HttpURLConnection? = null
         var lastConnection: HttpURLConnection? = null
-        for (origin in origins) {
-            val connection = openConnection(origin + path, method, headers)
+        var lastCode = -1
+        var lastUrl = ""
+        val originPath = rewriteCustomRootPathForOrigin(path)
+        for (origin in originsSnapshot) {
+            val originUrl = origin + originPath
+            val connection = openConnection(originUrl, method, headers)
             lastConnection = connection
             val code = connection.responseCode
+            lastCode = code
+            lastUrl = originUrl
             if (code !in listOf(404, 403)) {
                 successfulConnection = connection
                 break
@@ -117,8 +151,63 @@ class LocalAssetProxyServer(
         }
 
         val connection = successfulConnection ?: lastConnection ?: throw IOException("No asset origin available")
+        onLog("ASSET $method $path normalized=$assetPath result=origin code=$lastCode url=$lastUrl")
         writeHttpResponse(connection, output)
         connection.disconnect()
+    }
+
+    private fun rewriteCustomRootPathForOrigin(path: String): String {
+        val query = path.substringAfter('?', "")
+        val cleanPath = path.substringBefore('?')
+        val leadingSlash = cleanPath.startsWith("/")
+        val parts = cleanPath.removePrefix("/").split("/")
+        if (parts.size <= 1 || !parts.first().startsWith(PATCH_NAMESPACE)) return path
+        val rootSha = originalRootSha ?: return path
+        val rewritten = (if (leadingSlash) "/" else "") +
+            (listOf(rootSha) + parts.drop(1)).joinToString("/")
+        return if (query.isEmpty()) rewritten else "$rewritten?$query"
+    }
+
+    private fun normalizeAssetPath(path: String): String {
+        val cleanPath = path.removePrefix("/")
+        if (cleanPath == PATCHED_ASSET_PATH || cleanPath.endsWith("/$PATCHED_ASSET_PATH")) {
+            return PATCHED_ASSET_PATH
+        }
+        val parts = cleanPath.split("/")
+        return if (
+            parts.size > 1 &&
+            (
+                parts.first().startsWith(PATCH_NAMESPACE) ||
+                    (parts.first().length == SHA1_HEX_LENGTH && parts.first().all { it in '0'..'9' || it in 'a'..'f' })
+                )
+        ) {
+            parts.drop(1).joinToString("/")
+        } else {
+            cleanPath
+        }
+    }
+
+    private fun writePatchedAssetResponse(
+        method: String,
+        path: String,
+        bytes: ByteArray,
+        output: BufferedOutputStream
+    ) {
+        val contentType = when {
+            path.endsWith(".csv", ignoreCase = true) -> "text/csv"
+            path.endsWith(".json", ignoreCase = true) -> "application/json"
+            path.endsWith(".png", ignoreCase = true) -> "image/png"
+            else -> "application/octet-stream"
+        }
+        output.write("HTTP/1.1 200 OK\r\n".encodeToByteArray())
+        output.write("Content-Type: $contentType\r\n".encodeToByteArray())
+        output.write("Content-Length: ${bytes.size}\r\n".encodeToByteArray())
+        output.write("Connection: close\r\n".encodeToByteArray())
+        output.write("\r\n".encodeToByteArray())
+        if (!method.equals("HEAD", ignoreCase = true)) {
+            output.write(bytes)
+        }
+        output.flush()
     }
 
     private fun openConnection(
@@ -148,15 +237,15 @@ class LocalAssetProxyServer(
         connection.headerFields.forEach { (name, values) ->
             if (name == null || values.isNullOrEmpty()) return@forEach
             if (name.equals("Transfer-Encoding", ignoreCase = true)) return@forEach
-            values.forEach { value ->
-                val rewrittenValue = if (name.equals("Location", ignoreCase = true)) {
-                    value
-                        .replace(AssetProxyConfig.PRIMARY_ASSET_BASE_ORIGIN, AssetProxyConfig.LOCAL_BASE_URL)
-                        .replace(AssetProxyConfig.SECONDARY_ASSET_BASE_ORIGIN, AssetProxyConfig.LOCAL_BASE_URL)
+            val rewrittenValues = values.map { value ->
+                if (name.equals("Location", ignoreCase = true)) {
+                    rewriteLocationHeader(value)
                 } else {
                     value
                 }
-                output.write("$name: $rewrittenValue\r\n".encodeToByteArray())
+            }
+            rewrittenValues.forEach { value ->
+                output.write("$name: $value\r\n".encodeToByteArray())
             }
         }
         output.write("\r\n".encodeToByteArray())
@@ -177,6 +266,14 @@ class LocalAssetProxyServer(
         output.flush()
     }
 
+    private fun rewriteLocationHeader(value: String): String {
+        var rewritten = value
+        origins.forEach { origin ->
+            rewritten = rewritten.replace(origin, localAssetBaseUrl())
+        }
+        return rewritten
+    }
+
     private fun readHeaders(input: BufferedInputStream): Map<String, String> {
         val headers = linkedMapOf<String, String>()
         while (true) {
@@ -193,6 +290,10 @@ class LocalAssetProxyServer(
         output.write("HTTP/1.1 $code $message\r\nContent-Length: 0\r\n\r\n".encodeToByteArray())
         output.flush()
     }
+
+    companion object {
+        private const val SHA1_HEX_LENGTH = 40
+    }
 }
 
 private fun BufferedInputStream.readAsciiLine(): String? {
@@ -202,8 +303,12 @@ private fun BufferedInputStream.readAsciiLine(): String? {
         if (value == -1) {
             return if (out.size() == 0) null else out.toString(Charsets.US_ASCII.name())
         }
-        if (value == '\n'.code) break
-        if (value != '\r'.code) out.write(value)
+        if (value == '\n'.code) {
+            break
+        }
+        if (value != '\r'.code) {
+            out.write(value)
+        }
     }
     return out.toString(Charsets.US_ASCII.name())
 }
