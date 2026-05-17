@@ -3,6 +3,7 @@
     <string name="status_vpn_permission_denied">VPN permission denied</string>
     <string name="log_vpn_permission_denied">VPN permission denied by user</string>
     <string name="label_auto_disable_vpn">Авто выключение VPN</string>
+    <string name="label_install_result_notifications">Уведомления о результате установки</string>
     <string name="label_auto_launch_app">Приложение для автозапуска</string>
     <string name="option_no_auto_launch">Без автозапуска</string>
     <string name="label_ip_filter">Фильтр по IP</string>
@@ -17,10 +18,15 @@
     <string name="button_stop">Остановить</string>
     <string name="button_settings">Настройки</string>
     <string name="button_done">Готово</string>
+    <string name="button_continue">Продолжить</string>
     <string name="button_select_mod_folder">Выбрать папку мода</string>
     <string name="button_clear_mod_folder">Очистить папку мода</string>
     <string name="label_mod_folder">Папка мода</string>
     <string name="title_settings">Настройки</string>
+    <string name="title_manual_launch_needed">Запусти игру вручную</string>
+    <string name="message_manual_launch_install">Теперь нужно вручную зайти в игру и дождаться входа в меню. Если мод большой, загрузка может занять заметно больше времени обычного.</string>
+    <string name="message_manual_launch_remove">Теперь нужно вручную зайти в игру и дождаться входа в меню, чтобы удаление модов завершилось. Если мод большой, загрузка может занять заметно больше времени обычного.</string>
+    <string name="message_restart_game_to_remove_mods">Вам необходимо перезапустить игру чтобы удалить моды</string>
     <string name="label_latest_fingerprint">Последний fingerprint</string>
     <string name="label_latest_game_server">Последний игровой сервер</string>
     <string name="value_mod_folder_not_selected">Не выбрана</string>
@@ -48,4 +54,6 @@
     <string name="notification_install_result_title">Мод установлен</string>
     <string name="notification_install_result_text">Применено %1$d из %2$d файлов</string>
     <string name="notification_install_result_big_text">Применено %1$d из %2$d файлов. Если какие-то изменения не применились, перезапустите игру.</string>
+    <string name="notification_install_result_already_applied_title">Мод уже установлен</string>
+    <string name="notification_install_result_already_applied_text">Игра не запросила новые файлы, повторная загрузка не понадобилась</string>
 </resources>

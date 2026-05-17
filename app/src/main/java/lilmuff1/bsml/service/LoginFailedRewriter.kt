@@ -34,6 +34,7 @@ class LoginFailedRewriter(
     @Volatile
     private var lastStoredServerClientHelloHash: String? = null
     private val decompressedFingerprintCache = ConcurrentHashMap<String, FingerprintRewriteResult>()
+    private val inflatedFingerprintCache = ConcurrentHashMap<String, InflatedFingerprintCacheEntry>()
     fun rewriteCleanup(
         body: ByteArray,
         reasonCode: Int,
@@ -622,9 +623,12 @@ class LoginFailedRewriter(
     includeTriggerAsset: Boolean
     ): CompressedFingerprintRewriteResult {
     val cacheKey = buildDecompressedFingerprintCacheKey(compressedFingerprint)
-    val inflated = inflateFingerprint(compressedFingerprint) ?: return CompressedFingerprintRewriteResult(null, null, FingerprintPatchStats())
+    val inflated = inflatedFingerprintCache[cacheKey] ?: inflateFingerprint(compressedFingerprint)
+        ?.let { InflatedFingerprintCacheEntry(format = it.first, json = it.second) }
+        ?.also { inflatedFingerprintCache[cacheKey] = it }
+        ?: return CompressedFingerprintRewriteResult(null, null, FingerprintPatchStats())
     val base = decompressedFingerprintCache[cacheKey] ?: rewriteFingerprintJsonStructured(
-        fingerprintJson = inflated.second,
+        fingerprintJson = inflated.json,
         shouldPatchRootFingerprintSha = false,
         includeTriggerAsset = false
     ).also {
@@ -636,7 +640,7 @@ class LoginFailedRewriter(
         shouldPatchRootFingerprintSha = shouldPatchRootFingerprintSha,
         includeTriggerAsset = includeTriggerAsset
     )
-    val bytes = deflateFingerprint(rewritten.json, inflated.first)
+    val bytes = deflateFingerprint(rewritten.json, inflated.format)
     return CompressedFingerprintRewriteResult(bytes, rewritten.rootSha, rewritten.patchStats, rewritten.json)
 }
 

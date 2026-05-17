@@ -74,11 +74,6 @@ class LocalVpnService : VpnService() {
     private val autoDisableGeneration = AtomicInteger(0)
 
     private class InstallSessionState {
-        @Volatile var loginFailedRewriteDone = false
-        @Volatile var originalRootAfterPatchSeen = false
-        @Volatile var finalOriginalClientHelloHandled = false
-        @Volatile var contentHashRewriteEnabled = true
-        @Volatile var currentClientHelloContentHash: String? = null
         @Volatile var originalAssetRootSha: String? = null
     }
 
@@ -452,14 +447,15 @@ class LocalVpnService : VpnService() {
                 proxyState.remove(key)
             }
 
-            override fun shouldRewriteContentHash(): Boolean = sessionState.contentHashRewriteEnabled
+            override fun shouldRewriteContentHash(): Boolean = InstallFlowRepository.isContentHashRewriteEnabled()
 
             override fun onClientHelloContentHashObserved(contentHash: String) {
                 val normalized = contentHash.trim()
                 if (normalized.isNotEmpty()) {
-                    sessionState.currentClientHelloContentHash = normalized
+                    InstallFlowRepository.setCurrentClientHelloHash(normalized)
                     if (normalized.startsWith(PATCH_NAMESPACE)) {
-                        sessionState.contentHashRewriteEnabled = false
+                        InstallFlowRepository.markPatchedClientHelloSeen()
+                        InstallFlowRepository.disableContentHashRewrite()
                     }
                 }
             }
@@ -481,10 +477,10 @@ class LocalVpnService : VpnService() {
     }
 
     private fun rewriteLoginFailedBody(body: ByteArray, sessionState: InstallSessionState): LoginFailedRewriteResult {
-        val currentClientHash = sessionState.currentClientHelloContentHash
+        val currentClientHash = InstallFlowRepository.getCurrentClientHelloHash()
         val currentHashAlreadyPatched = currentClientHash?.startsWith(PATCH_NAMESPACE) == true
         val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED &&
-            !sessionState.loginFailedRewriteDone &&
+            !InstallFlowRepository.wasRootShaRewriteApplied() &&
             !currentHashAlreadyPatched
         val result = if (cleanupModeEnabled) {
             if (!cleanupWarmupSent) {
@@ -503,7 +499,7 @@ class LocalVpnService : VpnService() {
                     body = body,
                     reasonCode = activeReasonCode,
                     reasonName = activeReasonName,
-                    reasonText = "Вам необходимо перезапустить игру чтобы удалить моды"
+                    reasonText = getString(R.string.message_restart_game_to_remove_mods)
                 )
             }
         } else {
@@ -519,8 +515,8 @@ class LocalVpnService : VpnService() {
                 currentClientHelloHash = currentClientHash
             )
         }
-        if (result.assetUrlRewritten && sessionState.contentHashRewriteEnabled) {
-            sessionState.contentHashRewriteEnabled = false
+        if (result.assetUrlRewritten) {
+            InstallFlowRepository.disableContentHashRewrite()
         }
         if (result.assetOrigins.isNotEmpty()) {
             startService(
@@ -535,24 +531,27 @@ class LocalVpnService : VpnService() {
         }
         if (result.originalRootSha != null) {
             sessionState.originalAssetRootSha = result.originalRootSha
+            InstallFlowRepository.setOriginalRootSha(result.originalRootSha)
         }
         handleOriginalRootAfterPatch(result.hashes.rootSha, sessionState)
         if (result.rootShaRewriteApplied) {
-            sessionState.loginFailedRewriteDone = true
+            InstallFlowRepository.markRootShaRewriteApplied()
         }
         return result
     }
 
     private fun handleOriginalRootAfterPatch(rootSha: String?, sessionState: InstallSessionState) {
-        val originalRootSha = sessionState.originalAssetRootSha ?: return
+        val originalRootSha = sessionState.originalAssetRootSha
+            ?: InstallFlowRepository.getOriginalRootSha()
+            ?: return
         if (
-            !sessionState.loginFailedRewriteDone ||
-            sessionState.originalRootAfterPatchSeen ||
+            !InstallFlowRepository.wasRootShaRewriteApplied() ||
+            InstallFlowRepository.wasOriginalRootAfterPatchSeen() ||
             rootSha != originalRootSha
         ) {
             return
         }
-        sessionState.originalRootAfterPatchSeen = true
+        InstallFlowRepository.markOriginalRootAfterPatchSeen()
     }
 
     private fun handleFinalOriginalClientHello(contentHash: String, sessionState: InstallSessionState) {
@@ -560,21 +559,32 @@ class LocalVpnService : VpnService() {
             cleanupNormalHashSeen = true
             VpnLogRepository.log("SC cleanup normal CLIENT_HELLO restored contentHash=$contentHash")
         }
-        val originalRootSha = sessionState.originalAssetRootSha ?: return
+        val originalRootSha = sessionState.originalAssetRootSha
+            ?: InstallFlowRepository.getOriginalRootSha()
+            ?: return
         if (
-            !sessionState.originalRootAfterPatchSeen ||
-            sessionState.finalOriginalClientHelloHandled ||
+            !InstallFlowRepository.wasOriginalRootAfterPatchSeen() &&
+            InstallFlowRepository.wasRootShaRewriteApplied() &&
+            contentHash == originalRootSha
+        ) {
+            InstallFlowRepository.markOriginalRootAfterPatchSeen()
+        }
+        if (
+            !InstallFlowRepository.wasOriginalRootAfterPatchSeen() ||
             contentHash != originalRootSha
         ) {
             return
         }
-        sessionState.finalOriginalClientHelloHandled = true
+        VpnLogRepository.log("SC final CLIENT_HELLO detected contentHash=$contentHash")
         if (!cleanupModeEnabled) {
-            VpnNotificationFactory.notifyInstallResult(
-                context = this,
-                patchedCount = InstallFlowRepository.servedPatchedCount(),
-                totalCount = ModFilesRepository.listPreparedPaths(appContext).size
-            )
+            if (InstallFlowRepository.tryMarkInstallResultNotified()) {
+                VpnNotificationFactory.notifyInstallResult(
+                    context = this,
+                    patchedCount = InstallFlowRepository.servedPatchedCount(),
+                    totalCount = ModFilesRepository.listPreparedPaths(appContext).size
+                )
+                VpnLogRepository.log("SC install result notification sent patched=${InstallFlowRepository.servedPatchedCount()}")
+            }
         }
         if (VpnLogRepository.isAutoVpnDisableEnabledNow()) {
             scheduleAutoDisableAfterQuietTraffic()

@@ -1,5 +1,6 @@
 package lilmuff1.bsml.state
 
+import android.content.Context
 import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -27,6 +28,15 @@ data class CleanupReasonSpec(
 object VpnLogRepository {
     private const val TAG = "BSMLLocalVpn"
     private const val MAX_LOGS = 200
+    private const val PREFS_NAME = "bsml_vpn_settings"
+    private const val KEY_AUTO_VPN_DISABLE = "auto_vpn_disable"
+    private const val KEY_AUTO_LAUNCH_GAME = "auto_launch_game"
+    private const val KEY_IP_FILTER_ENABLED = "ip_filter_enabled"
+    private const val KEY_IP_FILTER_TEXT = "ip_filter_text"
+    private const val KEY_PACKAGE_TEXT = "package_text"
+    private const val KEY_AUTO_LAUNCH_PACKAGE = "auto_launch_package"
+    private const val KEY_PORT_TEXT = "port_text"
+    private const val KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED = "install_result_notifications_enabled"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
     private val cleanupDeleteReason = CleanupReasonSpec(8, "CLIENT_UPDATE_AVAILABLE")
 
@@ -35,6 +45,8 @@ object VpnLogRepository {
     private val timeFormat = ThreadLocal.withInitial {
         SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     }
+    @Volatile
+    private var preferencesLoaded = false
 
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs = _logs.asStateFlow()
@@ -69,6 +81,37 @@ object VpnLogRepository {
     private val _portText = MutableStateFlow(GAME_PORT.toString())
     val portText = _portText.asStateFlow()
 
+    private val _isInstallResultNotificationsEnabled = MutableStateFlow(false)
+    val isInstallResultNotificationsEnabled = _isInstallResultNotificationsEnabled.asStateFlow()
+
+    fun initialize(context: Context) {
+        if (preferencesLoaded) return
+        synchronized(this) {
+            if (preferencesLoaded) return
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            _isAutoVpnDisableEnabled.value = prefs.getBoolean(KEY_AUTO_VPN_DISABLE, false)
+            _isAutoLaunchGameEnabled.value = prefs.getBoolean(KEY_AUTO_LAUNCH_GAME, false)
+            _isIpFilterEnabled.value = prefs.getBoolean(KEY_IP_FILTER_ENABLED, true)
+            _ipFilterText.value = prefs.getString(KEY_IP_FILTER_TEXT, DEFAULT_CAPTURE_TARGETS) ?: DEFAULT_CAPTURE_TARGETS
+            _packageText.value = prefs.getString(KEY_PACKAGE_TEXT, DEFAULT_CAPTURE_PACKAGES) ?: DEFAULT_CAPTURE_PACKAGES
+            _autoLaunchPackage.value = prefs.getString(KEY_AUTO_LAUNCH_PACKAGE, null)?.trim()?.ifEmpty { null }
+            _portText.value = prefs.getString(KEY_PORT_TEXT, GAME_PORT.toString())
+                ?.filter { it.isDigit() }
+                ?.take(5)
+                ?.ifEmpty { GAME_PORT.toString() }
+                ?: GAME_PORT.toString()
+            _isInstallResultNotificationsEnabled.value = prefs.getBoolean(KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED, false)
+            preferencesLoaded = true
+        }
+    }
+
+    private fun updatePreference(context: Context, block: android.content.SharedPreferences.Editor.() -> Unit) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .apply(block)
+            .apply()
+    }
+
     fun setStatus(status: String) {
         _status.value = status
     }
@@ -87,10 +130,20 @@ object VpnLogRepository {
         _isAutoVpnDisableEnabled.value = isEnabled
     }
 
+    fun setAutoVpnDisableEnabled(context: Context, isEnabled: Boolean) {
+        setAutoVpnDisableEnabled(isEnabled)
+        updatePreference(context) { putBoolean(KEY_AUTO_VPN_DISABLE, isEnabled) }
+    }
+
     fun isAutoVpnDisableEnabledNow(): Boolean = _isAutoVpnDisableEnabled.value
 
     fun setAutoLaunchGameEnabled(isEnabled: Boolean) {
         _isAutoLaunchGameEnabled.value = isEnabled
+    }
+
+    fun setAutoLaunchGameEnabled(context: Context, isEnabled: Boolean) {
+        setAutoLaunchGameEnabled(isEnabled)
+        updatePreference(context) { putBoolean(KEY_AUTO_LAUNCH_GAME, isEnabled) }
     }
 
     fun isAutoLaunchGameEnabledNow(): Boolean = _isAutoLaunchGameEnabled.value
@@ -99,21 +152,59 @@ object VpnLogRepository {
         _isIpFilterEnabled.value = isEnabled
     }
 
+    fun setIpFilterEnabled(context: Context, isEnabled: Boolean) {
+        setIpFilterEnabled(isEnabled)
+        updatePreference(context) { putBoolean(KEY_IP_FILTER_ENABLED, isEnabled) }
+    }
+
     fun setIpFilterText(text: String) {
         _ipFilterText.value = text
+    }
+
+    fun setIpFilterText(context: Context, text: String) {
+        setIpFilterText(text)
+        updatePreference(context) { putString(KEY_IP_FILTER_TEXT, text) }
     }
 
     fun setPackageText(text: String) {
         _packageText.value = text
     }
 
+    fun setPackageText(context: Context, text: String) {
+        setPackageText(text)
+        updatePreference(context) { putString(KEY_PACKAGE_TEXT, text) }
+    }
+
     fun setAutoLaunchPackage(packageName: String?) {
         _autoLaunchPackage.value = packageName?.trim()?.ifEmpty { null }
+    }
+
+    fun setAutoLaunchPackage(context: Context, packageName: String?) {
+        val normalized = packageName?.trim()?.ifEmpty { null }
+        setAutoLaunchPackage(normalized)
+        updatePreference(context) { putString(KEY_AUTO_LAUNCH_PACKAGE, normalized) }
     }
 
     fun setPortText(text: String) {
         _portText.value = text.filter { it.isDigit() }.take(5)
     }
+
+    fun setPortText(context: Context, text: String) {
+        val normalized = text.filter { it.isDigit() }.take(5)
+        setPortText(normalized)
+        updatePreference(context) { putString(KEY_PORT_TEXT, normalized) }
+    }
+
+    fun setInstallResultNotificationsEnabled(isEnabled: Boolean) {
+        _isInstallResultNotificationsEnabled.value = isEnabled
+    }
+
+    fun setInstallResultNotificationsEnabled(context: Context, isEnabled: Boolean) {
+        setInstallResultNotificationsEnabled(isEnabled)
+        updatePreference(context) { putBoolean(KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED, isEnabled) }
+    }
+
+    fun isInstallResultNotificationsEnabledNow(): Boolean = _isInstallResultNotificationsEnabled.value
 
     fun captureSettingsNow(): VpnCaptureSettings {
         val port = _portText.value.toIntOrNull()

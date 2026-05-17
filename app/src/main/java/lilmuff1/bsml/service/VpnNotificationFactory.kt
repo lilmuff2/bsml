@@ -6,10 +6,13 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import lilmuff1.bsml.R
+import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.ui.MainActivity
 
 object VpnNotificationFactory {
@@ -37,6 +40,13 @@ object VpnNotificationFactory {
     }
 
     fun notifyInstallResult(context: Context, patchedCount: Int, totalCount: Int) {
+        if (!VpnLogRepository.isInstallResultNotificationsEnabledNow()) return
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         createResultChannel(context)
 
         val openAppIntent = PendingIntent.getActivity(
@@ -46,25 +56,46 @@ object VpnNotificationFactory {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val contentText = context.getString(
-            R.string.notification_install_result_text,
-            patchedCount,
-            totalCount
-        )
+        val alreadyApplied = patchedCount == 0
+        val contentText = if (alreadyApplied) {
+            context.getString(R.string.notification_install_result_already_applied_text)
+        } else {
+            context.getString(
+                R.string.notification_install_result_text,
+                patchedCount,
+                totalCount
+            )
+        }
         val notification = NotificationCompat.Builder(context, RESULT_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(context.getString(R.string.notification_install_result_title))
+            .setContentTitle(
+                context.getString(
+                    if (alreadyApplied) {
+                        R.string.notification_install_result_already_applied_title
+                    } else {
+                        R.string.notification_install_result_title
+                    }
+                )
+            )
             .setContentText(contentText)
             .setStyle(
                 NotificationCompat.BigTextStyle().bigText(
-                    context.getString(
-                        R.string.notification_install_result_big_text,
-                        patchedCount,
-                        totalCount
-                    )
+                    if (alreadyApplied) {
+                        context.getString(R.string.notification_install_result_already_applied_text)
+                    } else {
+                        context.getString(
+                            R.string.notification_install_result_big_text,
+                            patchedCount,
+                            totalCount
+                        )
+                    }
                 )
             )
             .setContentIntent(openAppIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .build()
 
@@ -94,7 +125,7 @@ object VpnNotificationFactory {
             NotificationChannel(
                 RESULT_CHANNEL_ID,
                 context.getString(R.string.notification_install_result_channel),
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_HIGH
             )
         )
     }

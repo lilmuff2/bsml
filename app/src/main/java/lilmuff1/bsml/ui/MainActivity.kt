@@ -1,6 +1,7 @@
 package lilmuff1.bsml.ui
 
 import android.app.Activity.RESULT_OK
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -15,21 +16,29 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,6 +59,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.input.KeyboardType
@@ -97,6 +107,7 @@ private fun MainScreen() {
     val isVpnRunning by VpnLogRepository.isRunning.collectAsState()
     val isAssetProxyRunning by VpnLogRepository.isAssetProxyRunning.collectAsState()
     val isAutoVpnDisableEnabled by VpnLogRepository.isAutoVpnDisableEnabled.collectAsState()
+    val isInstallResultNotificationsEnabled by VpnLogRepository.isInstallResultNotificationsEnabled.collectAsState()
     val isIpFilterEnabled by VpnLogRepository.isIpFilterEnabled.collectAsState()
     val ipFilterText by VpnLogRepository.ipFilterText.collectAsState()
     val packageText by VpnLogRepository.packageText.collectAsState()
@@ -109,6 +120,7 @@ private fun MainScreen() {
     var pendingCleanupMode by remember { mutableStateOf(false) }
     var pendingCleanupReason by remember { mutableStateOf<CleanupReasonSpec?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var pendingManualLaunchHint by remember { mutableStateOf<PendingManualLaunchHint?>(null) }
     val modFolderLabel = stringResource(R.string.label_mod_folder)
     val modFolderNotSelected = stringResource(R.string.value_mod_folder_not_selected)
     val stopLabel = stringResource(R.string.button_stop)
@@ -126,6 +138,7 @@ private fun MainScreen() {
     val isInstallEnabled = !isRunning && selectedModFolderName != null
 
     LaunchedEffect(context) {
+        VpnLogRepository.initialize(context)
         ModFilesRepository.refreshState(context)
         LatestFingerprintRepository.refreshState(context)
     }
@@ -162,6 +175,11 @@ private fun MainScreen() {
             }
         }
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        VpnLogRepository.setInstallResultNotificationsEnabled(context, granted)
+    }
     fun requestStart(cleanupMode: Boolean, cleanupReason: CleanupReasonSpec?) {
         pendingCleanupMode = cleanupMode
         pendingCleanupReason = cleanupReason
@@ -180,6 +198,7 @@ private fun MainScreen() {
         SettingsDialog(
             isRunning = isRunning,
             isAutoVpnDisableEnabled = isAutoVpnDisableEnabled,
+            isInstallResultNotificationsEnabled = isInstallResultNotificationsEnabled,
             isIpFilterEnabled = isIpFilterEnabled,
             ipFilterText = ipFilterText,
             packageText = packageText,
@@ -192,6 +211,18 @@ private fun MainScreen() {
             latestGameServerLabel = latestGameServerLabel,
             latestGameServerNotLoaded = latestGameServerNotLoaded,
             onDismiss = { showSettings = false },
+            onInstallResultNotificationsChange = { enabled ->
+                if (!enabled) {
+                    VpnLogRepository.setInstallResultNotificationsEnabled(context, false)
+                } else if (
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    VpnLogRepository.setInstallResultNotificationsEnabled(context, true)
+                }
+            },
             onFetchLatest = {
                 scope.launch {
                     LatestFingerprintRepository.fetchLatest(context)
@@ -200,216 +231,284 @@ private fun MainScreen() {
         )
     }
 
+    pendingManualLaunchHint?.let { hint ->
+        AlertDialog(
+            onDismissRequest = { pendingManualLaunchHint = null },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingManualLaunchHint = null
+                        requestStart(
+                            cleanupMode = hint.cleanupMode,
+                            cleanupReason = hint.cleanupReason
+                        )
+                    }
+                ) {
+                    Text(stringResource(R.string.button_continue))
+                }
+            },
+            title = {
+                Text(stringResource(R.string.title_manual_launch_needed))
+            },
+            text = {
+                Text(
+                    text = stringResource(
+                        if (hint.cleanupMode) {
+                            R.string.message_manual_launch_remove
+                        } else {
+                            R.string.message_manual_launch_install
+                        }
+                    ),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        )
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(24.dp)
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+                .padding(horizontal = 20.dp, vertical = 16.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.Start,
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold
-                )
-                IconButton(
-                    enabled = !latestFingerprintState.isFetching,
-                    onClick = { showSettings = true }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("⚙", style = MaterialTheme.typography.titleLarge)
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "$modFolderLabel: ${selectedModFolderName ?: modFolderNotSelected}",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (selectedModFolderName != null) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.app_name),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Локальный VPN и прокси для установки и удаления модов",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     IconButton(
-                        enabled = !isRunning && !preparation.isPreparing,
-                        onClick = { ModFilesRepository.setTreeUri(context, null) }
+                        enabled = !latestFingerprintState.isFetching,
+                        onClick = { showSettings = true }
                     ) {
-                        Text("×", style = MaterialTheme.typography.titleLarge)
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "⚙",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
-            }
-            androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(12.dp))
-            if (selectedModFolderName == null) {
-                OutlinedButton(
-                    enabled = !isRunning && !preparation.isPreparing,
-                    onClick = { folderPickerLauncher.launch(null) },
-                    modifier = Modifier.fillMaxWidth()
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
+                        .padding(18.dp)
                 ) {
-                    Text(stringResource(R.string.button_select_mod_folder))
-                }
-            }
-            when {
-                preparation.isPreparing -> {
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(12.dp))
-                    if (preparation.totalCount > 0) {
-                        CleanLinearProgressIndicator(
-                            progress = preparation.progress,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    } else {
-                        CleanIndeterminateProgressIndicator(
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (preparation.totalCount > 0) {
-                            "$preparingLabel ${preparation.preparedCount}/${preparation.totalCount}"
-                        } else {
-                            preparingLabel
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                preparation.error != null -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "$errorPrefix ${preparation.error}",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                        if (selectedModFolderName != null) {
-                            IconButton(
-                                enabled = !isRunning,
-                                onClick = {
-                                    scope.launch {
-                                        ModFilesRepository.prepareFiles(context)
-                                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "$modFolderLabel: ${selectedModFolderName ?: modFolderNotSelected}",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            if (selectedModFolderName != null) {
+                                IconButton(
+                                    enabled = !isRunning && !preparation.isPreparing,
+                                    onClick = { ModFilesRepository.setTreeUri(context, null) }
+                                ) {
+                                    Text("×", style = MaterialTheme.typography.titleLarge)
                                 }
+                            }
+                        }
+
+                        if (selectedModFolderName == null) {
+                            OutlinedButton(
+                                enabled = !isRunning && !preparation.isPreparing,
+                                onClick = { folderPickerLauncher.launch(null) },
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("↻", style = MaterialTheme.typography.titleMedium)
+                                Text(stringResource(R.string.button_select_mod_folder))
                             }
                         }
-                    }
-                }
-                selectedModFolderName != null && preparation.isReady -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "$readyLabel ${preparation.preparedCount}",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        IconButton(
-                            enabled = !isRunning,
-                            onClick = {
-                                scope.launch {
-                                    ModFilesRepository.prepareFiles(context)
+
+                        when {
+                            preparation.isPreparing -> {
+                                if (preparation.totalCount > 0) {
+                                    CleanLinearProgressIndicator(
+                                        progress = preparation.progress,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                } else {
+                                    CleanIndeterminateProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
                                 }
+                                Text(
+                                    text = if (preparation.totalCount > 0) {
+                                        "$preparingLabel ${preparation.preparedCount}/${preparation.totalCount}"
+                                    } else {
+                                        preparingLabel
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
                             }
-                        ) {
-                            Text("↻", style = MaterialTheme.typography.titleMedium)
+                            preparation.error != null -> {
+                                StatusRow(
+                                    text = "$errorPrefix ${preparation.error}",
+                                    color = MaterialTheme.colorScheme.error,
+                                    enabled = !isRunning && selectedModFolderName != null,
+                                    onRefresh = {
+                                        scope.launch { ModFilesRepository.prepareFiles(context) }
+                                    }
+                                )
+                            }
+                            selectedModFolderName != null && preparation.isReady -> {
+                                StatusRow(
+                                    text = "$readyLabel ${preparation.preparedCount}",
+                                    enabled = !isRunning,
+                                    onRefresh = {
+                                        scope.launch { ModFilesRepository.prepareFiles(context) }
+                                    }
+                                )
+                            }
+                            selectedModFolderName != null -> {
+                                StatusRow(
+                                    text = emptyLabel,
+                                    enabled = !isRunning,
+                                    onRefresh = {
+                                        scope.launch { ModFilesRepository.prepareFiles(context) }
+                                    }
+                                )
+                            }
                         }
-                    }
-                }
-                selectedModFolderName != null -> {
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = emptyLabel,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        IconButton(
-                            enabled = !isRunning,
-                            onClick = {
-                                scope.launch {
-                                    ModFilesRepository.prepareFiles(context)
-                                }
-                            }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text("↻", style = MaterialTheme.typography.titleMedium)
+                            OutlinedButton(
+                                enabled = !isRunning && !preparation.isPreparing,
+                                onClick = {
+                                    val cleanupReason = VpnLogRepository.cleanupDeleteReason()
+                                    cleanupReason?.let { reason ->
+                                        VpnLogRepository.log("UI cleanup queued reason=${reason.code} ${reason.name}")
+                                    }
+                                    if (VpnLogRepository.captureSettingsNow().autoLaunchPackage == null) {
+                                        pendingManualLaunchHint = PendingManualLaunchHint(
+                                            cleanupMode = true,
+                                            cleanupReason = cleanupReason
+                                        )
+                                    } else {
+                                        requestStart(cleanupMode = true, cleanupReason = cleanupReason)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(58.dp),
+                                shape = RoundedCornerShape(18.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            ) {
+                                Text("✕", style = MaterialTheme.typography.titleMedium)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.button_remove_mod))
+                            }
+                            Button(
+                                enabled = isRunning || isInstallEnabled,
+                                onClick = {
+                                    if (isRunning) {
+                                        stopMonitoring(context)
+                                    } else {
+                                        if (VpnLogRepository.captureSettingsNow().autoLaunchPackage == null) {
+                                            pendingManualLaunchHint = PendingManualLaunchHint(
+                                                cleanupMode = false,
+                                                cleanupReason = null
+                                            )
+                                        } else {
+                                            requestStart(cleanupMode = false, cleanupReason = null)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1.2f)
+                                    .height(58.dp),
+                                shape = RoundedCornerShape(18.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            ) {
+                                Text(
+                                    text = if (isRunning) "■" else "↓",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = if (isRunning) stopLabel else if (preparation.isPreparing) preparingLabel else installLabel,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
             }
-            androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(24.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    enabled = isRunning || isInstallEnabled,
-                    onClick = {
-                        if (isRunning) {
-                            stopMonitoring(context)
-                        } else {
-                            requestStart(cleanupMode = false, cleanupReason = null)
-                        }
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                ) {
-                    Text(
-                        text = if (isRunning) "■" else "↓",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isRunning) stopLabel else if (preparation.isPreparing) preparingLabel else installLabel,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                OutlinedButton(
-                    enabled = !isRunning && !preparation.isPreparing,
-                    onClick = {
-                        val cleanupReason = VpnLogRepository.cleanupDeleteReason()
-                        cleanupReason?.let { reason ->
-                            VpnLogRepository.log("UI cleanup queued reason=${reason.code} ${reason.name}")
-                        }
-                        requestStart(
-                            cleanupMode = true,
-                            cleanupReason = cleanupReason
-                        )
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                ) {
-                    Text("✕", style = MaterialTheme.typography.titleMedium)
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
-                    Text(stringResource(R.string.button_remove_mod))
-                }
-            }
+        }
+    }
+}
+
+private data class PendingManualLaunchHint(
+    val cleanupMode: Boolean,
+    val cleanupReason: CleanupReasonSpec?
+)
+
+@Composable
+private fun StatusRow(
+    text: String,
+    enabled: Boolean,
+    onRefresh: () -> Unit,
+    color: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = color
+        )
+        IconButton(enabled = enabled, onClick = onRefresh) {
+            Text("↻", style = MaterialTheme.typography.headlineSmall)
         }
     }
 }
@@ -418,6 +517,7 @@ private fun MainScreen() {
 private fun SettingsDialog(
     isRunning: Boolean,
     isAutoVpnDisableEnabled: Boolean,
+    isInstallResultNotificationsEnabled: Boolean,
     isIpFilterEnabled: Boolean,
     ipFilterText: String,
     packageText: String,
@@ -430,8 +530,10 @@ private fun SettingsDialog(
     latestGameServerLabel: String,
     latestGameServerNotLoaded: String,
     onDismiss: () -> Unit,
+    onInstallResultNotificationsChange: (Boolean) -> Unit,
     onFetchLatest: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -449,13 +551,24 @@ private fun SettingsDialog(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
+                        text = stringResource(R.string.label_install_result_notifications),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Switch(
+                        checked = isInstallResultNotificationsEnabled,
+                        onCheckedChange = onInstallResultNotificationsChange
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
                         text = stringResource(R.string.label_auto_disable_vpn),
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.bodyLarge
                     )
                     Switch(
                         checked = isAutoVpnDisableEnabled,
-                        onCheckedChange = VpnLogRepository::setAutoVpnDisableEnabled
+                        onCheckedChange = { VpnLogRepository.setAutoVpnDisableEnabled(context, it) }
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -466,28 +579,28 @@ private fun SettingsDialog(
                     )
                     Switch(
                         checked = isIpFilterEnabled,
-                        onCheckedChange = VpnLogRepository::setIpFilterEnabled,
+                        onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
                         enabled = !isRunning
                     )
                 }
                 if (isIpFilterEnabled) {
                     ArrayTextField(
                         value = ipFilterText,
-                        onValueChange = VpnLogRepository::setIpFilterText,
+                        onValueChange = { VpnLogRepository.setIpFilterText(context, it) },
                         enabled = !isRunning,
                         label = stringResource(R.string.label_ip_hosts)
                     )
                 } else {
                     ArrayTextField(
                         value = packageText,
-                        onValueChange = VpnLogRepository::setPackageText,
+                        onValueChange = { VpnLogRepository.setPackageText(context, it) },
                         enabled = !isRunning,
                         label = stringResource(R.string.label_package_names)
                     )
                 }
                 OutlinedTextField(
                     value = portText,
-                    onValueChange = VpnLogRepository::setPortText,
+                    onValueChange = { VpnLogRepository.setPortText(context, it) },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !isRunning,
                     label = { Text(stringResource(R.string.label_port)) },
@@ -503,14 +616,14 @@ private fun SettingsDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                VpnLogRepository.setAutoLaunchPackage(null)
+                                VpnLogRepository.setAutoLaunchPackage(context, null)
                             }
                             .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
                             selected = autoLaunchPackage == null,
-                            onClick = { VpnLogRepository.setAutoLaunchPackage(null) }
+                            onClick = { VpnLogRepository.setAutoLaunchPackage(context, null) }
                         )
                         Column(
                             modifier = Modifier.padding(start = 12.dp)
@@ -526,14 +639,14 @@ private fun SettingsDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    VpnLogRepository.setAutoLaunchPackage(app.packageName)
+                                    VpnLogRepository.setAutoLaunchPackage(context, app.packageName)
                                 }
                                 .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(
                                 selected = autoLaunchPackage == app.packageName,
-                                onClick = { VpnLogRepository.setAutoLaunchPackage(app.packageName) }
+                                onClick = { VpnLogRepository.setAutoLaunchPackage(context, app.packageName) }
                             )
                             Image(
                                 bitmap = app.icon.asImageBitmap(),

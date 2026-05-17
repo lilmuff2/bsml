@@ -27,6 +27,11 @@ data class CompressedFingerprintRewriteResult(
     val json: String? = null
 )
 
+data class InflatedFingerprintCacheEntry(
+    val format: String,
+    val json: String
+)
+
 data class FingerprintPatchStats(
     val fileShaPatched: Int = 0,
     val rootShaOld: String? = null,
