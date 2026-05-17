@@ -4,7 +4,7 @@ object PacketParser {
     private const val IPV4_MIN_HEADER_LENGTH = 20
     private const val PROTOCOL_TCP = 6
 
-    fun parse(packet: ByteArray, length: Int, targetIpInts: Set<Int>): PacketEvent? {
+    fun parse(packet: ByteArray, length: Int, targetIpInts: Set<Int>?): PacketEvent? {
         if (length < IPV4_MIN_HEADER_LENGTH) return null
         if (packet[0].toInt().ushr(4) != 4) return null
 
@@ -15,7 +15,13 @@ object PacketParser {
 
         val sourceIp = readIpv4(packet, 12)
         val destinationIp = readIpv4(packet, 16)
-        if (destinationIp !in targetIpInts && sourceIp !in targetIpInts) return null
+        if (
+            !targetIpInts.isNullOrEmpty() &&
+            destinationIp !in targetIpInts &&
+            sourceIp !in targetIpInts
+        ) {
+            return null
+        }
 
         val sourcePort = readUnsignedShort(packet, ipHeaderLength, length)
         val destinationPort = readUnsignedShort(packet, ipHeaderLength + 2, length)

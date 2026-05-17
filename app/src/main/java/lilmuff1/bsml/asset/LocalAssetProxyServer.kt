@@ -9,17 +9,18 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 import lilmuff1.bsml.config.LOCAL_ASSET_HOST
 import lilmuff1.bsml.config.LOCAL_ASSET_PORT
-import lilmuff1.bsml.config.PATCHED_ASSET_PATH
 import lilmuff1.bsml.config.PATCH_NAMESPACE
 import lilmuff1.bsml.config.localAssetBaseUrl
 
 class LocalAssetProxyServer(
     private val onLog: (String) -> Unit,
     private val openPatchedAsset: (String) -> ByteArray?,
-    private val onFirstAssetRequest: () -> Unit
+    private val onFirstAssetRequest: () -> Unit,
+    private val onPatchedAssetServed: (String) -> Unit
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
@@ -35,14 +36,27 @@ class LocalAssetProxyServer(
 
     @Volatile
     private var originalRootSha: String? = null
+    private val originsCacheByRootSha = ConcurrentHashMap<String, List<String>>()
 
     fun setRouting(newOrigins: List<String>, newOriginalRootSha: String?) {
-        origins = newOrigins
+        val normalizedOrigins = newOrigins
             .map { it.trim().trimEnd('/') }
             .filter { it.isNotEmpty() }
             .distinct()
-        originalRootSha = newOriginalRootSha?.takeIf { it.isNotBlank() }
-        onLog("ASSET routing updated origins=${origins.size} rootSha=${originalRootSha ?: "<unknown>"}")
+        val normalizedRootSha = newOriginalRootSha?.takeIf { it.isNotBlank() }
+        val cachedOrigins = normalizedRootSha?.let { originsCacheByRootSha[it] }
+        val nextOrigins = when {
+            normalizedOrigins.isNotEmpty() -> normalizedOrigins
+            cachedOrigins != null -> cachedOrigins
+            else -> origins
+        }
+        origins = nextOrigins
+        originalRootSha = normalizedRootSha ?: originalRootSha
+        normalizedRootSha?.let { rootSha ->
+            if (normalizedOrigins.isNotEmpty()) {
+                originsCacheByRootSha[rootSha] = normalizedOrigins
+            }
+        }
     }
 
     fun start() {
@@ -119,6 +133,7 @@ class LocalAssetProxyServer(
     ) {
         val patchedAsset = openPatchedAsset(assetPath)
         if (patchedAsset != null) {
+            onPatchedAssetServed(assetPath)
             onLog("ASSET $method $path normalized=$assetPath result=patched bytes=${patchedAsset.size}")
             writePatchedAssetResponse(method, assetPath, patchedAsset, output)
             return
@@ -170,9 +185,6 @@ class LocalAssetProxyServer(
 
     private fun normalizeAssetPath(path: String): String {
         val cleanPath = path.removePrefix("/")
-        if (cleanPath == PATCHED_ASSET_PATH || cleanPath.endsWith("/$PATCHED_ASSET_PATH")) {
-            return PATCHED_ASSET_PATH
-        }
         val parts = cleanPath.split("/")
         return if (
             parts.size > 1 &&

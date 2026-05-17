@@ -1,6 +1,8 @@
 package lilmuff1.bsml.service
 
 import lilmuff1.bsml.R
+import lilmuff1.bsml.state.InstallFlowRepository
+import lilmuff1.bsml.state.ModFilesRepository
 import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.ui.MainActivity
 
@@ -25,11 +27,12 @@ class AssetProxyService : Service() {
             val generated = runCatching {
                 File(filesDir, "$GENERATED_ASSET_DIR/$path").takeIf { it.isFile }?.readBytes()
             }.getOrNull()
-            generated ?: runCatching {
-                assets.open("patches/$path").use { input -> input.readBytes() }
-            }.getOrNull()
+            generated ?: ModFilesRepository.openPreparedFile(applicationContext, path)
         },
         onFirstAssetRequest = {
+        },
+        onPatchedAssetServed = { path ->
+            InstallFlowRepository.onPatchedAssetServed(path)
         }
     )
 
@@ -96,8 +99,8 @@ class AssetProxyService : Service() {
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("BSML Asset Proxy")
-            .setContentText("Proxying game assets")
+            .setContentTitle(getString(R.string.notification_asset_proxy_title))
+            .setContentText(getString(R.string.notification_asset_proxy_text))
             .setContentIntent(openAppIntent)
             .setOngoing(true)
             .build()

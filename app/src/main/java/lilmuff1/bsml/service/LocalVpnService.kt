@@ -2,11 +2,16 @@ package lilmuff1.bsml.service
 
 import lilmuff1.bsml.config.*
 import lilmuff1.bsml.protocol.debugLog
+import lilmuff1.bsml.R
+import lilmuff1.bsml.state.InstallFlowRepository
+import lilmuff1.bsml.state.LatestFingerprintRepository
+import lilmuff1.bsml.state.ModFilesRepository
 import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.vpn.*
 
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -19,6 +24,7 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 class LocalVpnService : VpnService() {
@@ -26,13 +32,16 @@ class LocalVpnService : VpnService() {
     private var readerThread: Thread? = null
     private var starterThread: Thread? = null
     private var tunOutput: FileOutputStream? = null
+    private val appContext by lazy { applicationContext }
     private val proxyState = ProxyState()
     private val loginFailedRewriter by lazy {
-        LoginFailedRewriter(filesDir) { path ->
-            runCatching {
-                assets.open("patches/$path").use { input -> input.readBytes() }
-            }.getOrNull()
-        }
+        LoginFailedRewriter(
+            filesDir = filesDir,
+            listPatchedAssetPaths = { ModFilesRepository.listPreparedPaths(appContext) },
+            getPatchedAssetSha = { path -> ModFilesRepository.getPreparedSha(appContext, path) },
+            openPatchedAsset = { path -> ModFilesRepository.openPreparedFile(appContext, path) },
+            getCurrentModStateKey = { ModFilesRepository.getPreparedStateSignature(appContext) }
+        )
     }
 
     @Volatile
@@ -45,25 +54,43 @@ class LocalVpnService : VpnService() {
     private var interceptionDisabled = false
 
     @Volatile
-    private var loginFailedRewriteDone = false
+    private var cleanupModeEnabled = false
 
     @Volatile
-    private var originalRootAfterPatchSeen = false
+    private var cleanupReasonCode = 7
 
     @Volatile
-    private var finalOriginalClientHelloHandled = false
+    private var cleanupReasonName = "CLIENT_CONTENT_UPDATE"
 
     @Volatile
-    private var contentHashRewriteEnabled = false
+    private var cleanupWarmupSent = false
 
     @Volatile
-    private var originalAssetRootSha: String? = null
+    private var cleanupZeroVersionPending = false
+
+    @Volatile
+    private var cleanupNormalHashSeen = false
+
+    private val autoDisableGeneration = AtomicInteger(0)
+
+    private class InstallSessionState {
+        @Volatile var loginFailedRewriteDone = false
+        @Volatile var originalRootAfterPatchSeen = false
+        @Volatile var finalOriginalClientHelloHandled = false
+        @Volatile var contentHashRewriteEnabled = true
+        @Volatile var currentClientHelloContentHash: String? = null
+        @Volatile var originalAssetRootSha: String? = null
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             when (intent?.action) {
                 ACTION_STOP -> stopVpn()
-                ACTION_START, null -> startVpn()
+                ACTION_START, null -> startVpn(
+                    cleanupMode = intent?.getBooleanExtra(EXTRA_CLEANUP_MODE, false) == true,
+                    cleanupReasonCode = intent?.getIntExtra(EXTRA_CLEANUP_REASON_CODE, 7) ?: 7,
+                    cleanupReasonName = intent?.getStringExtra(EXTRA_CLEANUP_REASON_NAME) ?: "CLIENT_CONTENT_UPDATE"
+                )
             }
         } catch (error: Throwable) {
             VpnLogRepository.log("FATAL onStartCommand ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
@@ -79,7 +106,7 @@ class LocalVpnService : VpnService() {
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
-    private fun startVpn() {
+    private fun startVpn(cleanupMode: Boolean, cleanupReasonCode: Int, cleanupReasonName: String) {
         if (active || starting) {
             debugLog("VPN already running")
             return
@@ -87,15 +114,25 @@ class LocalVpnService : VpnService() {
 
         starting = true
         interceptionDisabled = false
-        loginFailedRewriteDone = false
-        originalRootAfterPatchSeen = false
-        finalOriginalClientHelloHandled = false
-        contentHashRewriteEnabled = true
-        originalAssetRootSha = null
+        cleanupModeEnabled = cleanupMode
+        this.cleanupReasonCode = cleanupReasonCode
+        this.cleanupReasonName = cleanupReasonName
+        cleanupWarmupSent = false
+        cleanupZeroVersionPending = false
+        cleanupNormalHashSeen = false
+        InstallFlowRepository.reset()
+        autoDisableGeneration.incrementAndGet()
         VpnLogRepository.setStatus("Starting VPN...")
-        VpnLogRepository.log("VPN start requested; contentHash rewrite enabled")
+        VpnLogRepository.log(
+            if (cleanupMode) {
+                "VPN start requested; contentHash rewrite enabled cleanupMode=true warmup=7 CLIENT_CONTENT_UPDATE pending=1 LOGIN_FAILED delete=$cleanupReasonCode $cleanupReasonName"
+            } else {
+                "VPN start requested; contentHash rewrite enabled"
+            }
+        )
+        val captureSettings = VpnLogRepository.captureSettingsNow()
 
-        val notification = VpnNotificationFactory.build(this, "TCP proxy is starting")
+        val notification = VpnNotificationFactory.build(this, getString(R.string.notification_vpn_text))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -108,9 +145,13 @@ class LocalVpnService : VpnService() {
 
         starterThread = thread(name = "bsml-vpn-starter", start = true) {
             try {
-                val targetAddresses = resolveTargetAddresses()
-                if (targetAddresses.isEmpty()) {
-                    VpnLogRepository.log("VPN resolve failed for $GAME_HOST")
+                val targetAddresses = if (captureSettings.filterByIp) {
+                    resolveTargetAddresses(parseList(captureSettings.ipFilterText, GAME_HOST))
+                } else {
+                    emptyList()
+                }
+                if (captureSettings.filterByIp && targetAddresses.isEmpty()) {
+                    VpnLogRepository.log("VPN resolve failed for ${captureSettings.ipFilterText.ifBlank { GAME_HOST }}")
                     VpnLogRepository.setStatus("Resolve failed")
                     stopVpn()
                     return@thread
@@ -122,8 +163,14 @@ class LocalVpnService : VpnService() {
                     .setBlocking(true)
                     .addAddress(TUN_ADDRESS, 32)
 
-                targetAddresses.forEach { address ->
-                    builder.addRoute(address.hostAddress ?: return@forEach, 32)
+                val allowedPackages = parseList(captureSettings.packageText, DEFAULT_CAPTURE_PACKAGES)
+                applyAllowedApplications(builder, allowedPackages)
+                if (captureSettings.filterByIp) {
+                    targetAddresses.forEach { address ->
+                        builder.addRoute(address.hostAddress ?: return@forEach, 32)
+                    }
+                } else {
+                    builder.addRoute("0.0.0.0", 0)
                 }
 
                 vpnInterface = builder.establish()
@@ -138,12 +185,22 @@ class LocalVpnService : VpnService() {
                 tunOutput = FileOutputStream(descriptor.fileDescriptor)
                 active = true
                 VpnLogRepository.setRunning(true)
-                VpnLogRepository.setStatus("Listening on $GAME_HOST:$GAME_PORT")
-                VpnLogRepository.log("VPN established for ${targetAddresses.joinToString { it.hostAddress ?: "?" }}")
+                VpnLogRepository.setStatus("Listening on port ${captureSettings.port}")
+                if (captureSettings.filterByIp) {
+                    VpnLogRepository.log(
+                        "VPN established port=${captureSettings.port} ips=${targetAddresses.joinToString { it.hostAddress ?: "?" }} apps=${allowedPackages.size}"
+                    )
+                } else {
+                    VpnLogRepository.log("VPN established port=${captureSettings.port} ips=all apps=${allowedPackages.size}")
+                }
 
-                val targetIpInts = targetAddresses.map { ipv4BytesToInt(it.address) }.toSet()
+                val targetIpInts = if (captureSettings.filterByIp) {
+                    targetAddresses.map { ipv4BytesToInt(it.address) }.toSet()
+                } else {
+                    null
+                }
                 readerThread = thread(name = "bsml-vpn-reader", start = true) {
-                    readLoop(targetIpInts)
+                    readLoop(targetIpInts, captureSettings.port)
                 }
             } finally {
                 starting = false
@@ -160,6 +217,7 @@ class LocalVpnService : VpnService() {
 
         active = false
         starting = false
+        autoDisableGeneration.incrementAndGet()
 
         readerThread?.interrupt()
         readerThread = null
@@ -189,6 +247,7 @@ class LocalVpnService : VpnService() {
 
     private fun disableVpnTunnelKeepService() {
         interceptionDisabled = true
+        autoDisableGeneration.incrementAndGet()
         proxyState.close()
         active = false
         starting = false
@@ -212,7 +271,7 @@ class LocalVpnService : VpnService() {
         stopSelf()
     }
 
-    private fun readLoop(targetIpInts: Set<Int>) {
+    private fun readLoop(targetIpInts: Set<Int>?, targetPort: Int) {
         val descriptor = vpnInterface ?: return
 
         try {
@@ -230,7 +289,7 @@ class LocalVpnService : VpnService() {
                         continue
                     }
                     try {
-                        handleTcpPacket(event)
+                        handleTcpPacket(event, targetPort)
                     } catch (error: Throwable) {
                         VpnLogRepository.log("FATAL handleTcpPacket ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
                     }
@@ -250,15 +309,15 @@ class LocalVpnService : VpnService() {
         }
     }
 
-    private fun handleTcpPacket(event: PacketEvent) {
-        if (event.destinationPort != GAME_PORT && event.sourcePort != GAME_PORT) {
+    private fun handleTcpPacket(event: PacketEvent, targetPort: Int) {
+        if (event.destinationPort != targetPort && event.sourcePort != targetPort) {
             return
         }
 
         val flags = event.tcpFlags
         val clientPayload = event.payload()
 
-        if (flags and TCP_SYN != 0 && event.destinationPort == GAME_PORT) {
+        if (flags and TCP_SYN != 0 && event.destinationPort == targetPort) {
             debugLog("TCP SYN ${event.sourceIp}:${event.sourcePort} -> ${event.destinationIp}:${event.destinationPort}")
             if (!proxyState.tryStartSession(event)) {
                 debugLog("Reject extra SYN ${event.sourcePort}, active session is already running")
@@ -293,21 +352,26 @@ class LocalVpnService : VpnService() {
         }
     }
 
-    private fun resolveTargetAddresses(): List<Inet4Address> {
+    private fun resolveTargetAddresses(targetEntries: List<String>): List<Inet4Address> {
         var lastError: Throwable? = null
+        val addresses = LinkedHashMap<String, Inet4Address>()
         repeat(DNS_RESOLVE_ATTEMPTS) { index ->
             val attempt = index + 1
             try {
-                val addresses = InetAddress.getAllByName(GAME_HOST)
-                    .filterIsInstance<Inet4Address>()
-                    .distinctBy { it.hostAddress }
+                targetEntries.forEach { target ->
+                    InetAddress.getAllByName(target)
+                        .filterIsInstance<Inet4Address>()
+                        .forEach { address ->
+                            addresses[address.hostAddress ?: address.hostAddress] = address
+                        }
+                }
                 if (addresses.isNotEmpty()) {
                     VpnLogRepository.log(
-                        "VPN resolved $GAME_HOST attempt=$attempt ips=${addresses.joinToString { it.hostAddress ?: "?" }}"
+                        "VPN resolved attempt=$attempt ips=${addresses.values.joinToString { it.hostAddress ?: "?" }}"
                     )
-                    return addresses
+                    return addresses.values.toList()
                 }
-                VpnLogRepository.log("VPN resolve empty $GAME_HOST attempt=$attempt")
+                VpnLogRepository.log("VPN resolve empty attempt=$attempt")
             } catch (error: IOException) {
                 lastError = error
                 VpnLogRepository.log(
@@ -331,6 +395,25 @@ class LocalVpnService : VpnService() {
             )
         }
         return emptyList()
+    }
+
+    private fun parseList(text: String, fallback: String): List<String> {
+        val entries = text
+            .split(',', '\n', '\r', '\t', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        return entries.ifEmpty { listOf(fallback) }
+    }
+
+    private fun applyAllowedApplications(builder: Builder, packages: List<String>) {
+        packages.forEach { packageName ->
+            try {
+                builder.addAllowedApplication(packageName)
+            } catch (error: PackageManager.NameNotFoundException) {
+                VpnLogRepository.log("VPN app filter failed package=$packageName")
+            }
+        }
     }
 
     private fun sendToTun(bytes: ByteArray) {
@@ -357,7 +440,7 @@ class LocalVpnService : VpnService() {
         sendToTun(packet)
     }
 
-    private fun createSessionCallbacks(): TcpProxySessionCallbacks {
+    private fun createSessionCallbacks(sessionState: InstallSessionState): TcpProxySessionCallbacks {
         return object : TcpProxySessionCallbacks {
             override fun protectSocket(socket: Socket): Boolean = protect(socket)
 
@@ -369,23 +452,75 @@ class LocalVpnService : VpnService() {
                 proxyState.remove(key)
             }
 
-            override fun shouldRewriteContentHash(): Boolean = contentHashRewriteEnabled
+            override fun shouldRewriteContentHash(): Boolean = sessionState.contentHashRewriteEnabled
+
+            override fun onClientHelloContentHashObserved(contentHash: String) {
+                val normalized = contentHash.trim()
+                if (normalized.isNotEmpty()) {
+                    sessionState.currentClientHelloContentHash = normalized
+                    if (normalized.startsWith(PATCH_NAMESPACE)) {
+                        sessionState.contentHashRewriteEnabled = false
+                    }
+                }
+            }
+
+            override fun shouldZeroClientHelloGameVersion(): Boolean = cleanupModeEnabled && cleanupZeroVersionPending
+
+            override fun onClientHelloGameVersionZeroApplied() {
+                cleanupZeroVersionPending = false
+            }
 
             override fun onFinalOriginalClientHello(contentHash: String) {
-                handleFinalOriginalClientHello(contentHash)
+                handleFinalOriginalClientHello(contentHash, sessionState)
             }
 
             override fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult {
-                return this@LocalVpnService.rewriteLoginFailedBody(body)
+                return this@LocalVpnService.rewriteLoginFailedBody(body, sessionState)
             }
         }
     }
 
-    private fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult {
-        val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED && !loginFailedRewriteDone
-        val result = loginFailedRewriter.rewrite(body, shouldPatchRootFingerprintSha)
-        if (result.assetUrlRewritten && contentHashRewriteEnabled) {
-            contentHashRewriteEnabled = false
+    private fun rewriteLoginFailedBody(body: ByteArray, sessionState: InstallSessionState): LoginFailedRewriteResult {
+        val currentClientHash = sessionState.currentClientHelloContentHash
+        val currentHashAlreadyPatched = currentClientHash?.startsWith(PATCH_NAMESPACE) == true
+        val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED &&
+            !sessionState.loginFailedRewriteDone &&
+            !currentHashAlreadyPatched
+        val result = if (cleanupModeEnabled) {
+            if (!cleanupWarmupSent) {
+                cleanupWarmupSent = true
+                cleanupZeroVersionPending = true
+                loginFailedRewriter.rewriteCleanup(
+                    body = body,
+                    reasonCode = 7,
+                    reasonName = "CLIENT_CONTENT_UPDATE",
+                    reasonText = "BSML cleanup warmup"
+                )
+            } else {
+                val activeReasonCode = if (cleanupNormalHashSeen) cleanupReasonCode else 1
+                val activeReasonName = if (cleanupNormalHashSeen) cleanupReasonName else "LOGIN_FAILED"
+                loginFailedRewriter.rewriteCleanup(
+                    body = body,
+                    reasonCode = activeReasonCode,
+                    reasonName = activeReasonName,
+                    reasonText = "Вам необходимо перезапустить игру чтобы удалить моды"
+                )
+            }
+        } else {
+            val patchedAssetServed = InstallFlowRepository.wasPatchedModAssetServed()
+            val includeTriggerAsset = !shouldPatchRootFingerprintSha && (
+                patchedAssetServed ||
+                    currentHashAlreadyPatched
+                )
+            loginFailedRewriter.rewrite(
+                body = body,
+                shouldPatchRootFingerprintSha = shouldPatchRootFingerprintSha,
+                includeTriggerAsset = includeTriggerAsset,
+                currentClientHelloHash = currentClientHash
+            )
+        }
+        if (result.assetUrlRewritten && sessionState.contentHashRewriteEnabled) {
+            sessionState.contentHashRewriteEnabled = false
         }
         if (result.assetOrigins.isNotEmpty()) {
             startService(
@@ -399,45 +534,79 @@ class LocalVpnService : VpnService() {
             )
         }
         if (result.originalRootSha != null) {
-            originalAssetRootSha = result.originalRootSha
+            sessionState.originalAssetRootSha = result.originalRootSha
         }
-        handleOriginalRootAfterPatch(result.hashes.rootSha)
+        handleOriginalRootAfterPatch(result.hashes.rootSha, sessionState)
         if (result.rootShaRewriteApplied) {
-            loginFailedRewriteDone = true
+            sessionState.loginFailedRewriteDone = true
         }
         return result
     }
 
-    private fun handleOriginalRootAfterPatch(rootSha: String?) {
-        val originalRootSha = originalAssetRootSha ?: return
+    private fun handleOriginalRootAfterPatch(rootSha: String?, sessionState: InstallSessionState) {
+        val originalRootSha = sessionState.originalAssetRootSha ?: return
         if (
-            !loginFailedRewriteDone ||
-            originalRootAfterPatchSeen ||
+            !sessionState.loginFailedRewriteDone ||
+            sessionState.originalRootAfterPatchSeen ||
             rootSha != originalRootSha
         ) {
             return
         }
-        originalRootAfterPatchSeen = true
+        sessionState.originalRootAfterPatchSeen = true
     }
 
-    private fun handleFinalOriginalClientHello(contentHash: String) {
-        val originalRootSha = originalAssetRootSha ?: return
+    private fun handleFinalOriginalClientHello(contentHash: String, sessionState: InstallSessionState) {
+        if (cleanupModeEnabled && !cleanupNormalHashSeen && !contentHash.startsWith(PATCH_NAMESPACE)) {
+            cleanupNormalHashSeen = true
+            VpnLogRepository.log("SC cleanup normal CLIENT_HELLO restored contentHash=$contentHash")
+        }
+        val originalRootSha = sessionState.originalAssetRootSha ?: return
         if (
-            !originalRootAfterPatchSeen ||
-            finalOriginalClientHelloHandled ||
+            !sessionState.originalRootAfterPatchSeen ||
+            sessionState.finalOriginalClientHelloHandled ||
             contentHash != originalRootSha
         ) {
             return
         }
-        finalOriginalClientHelloHandled = true
+        sessionState.finalOriginalClientHelloHandled = true
+        if (!cleanupModeEnabled) {
+            VpnNotificationFactory.notifyInstallResult(
+                context = this,
+                patchedCount = InstallFlowRepository.servedPatchedCount(),
+                totalCount = ModFilesRepository.listPreparedPaths(appContext).size
+            )
+        }
         if (VpnLogRepository.isAutoVpnDisableEnabledNow()) {
-            VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; VPN interception disabled")
-            thread(name = "bsml-disable-after-original-root", start = true) {
-                Thread.sleep(500)
-                disableVpnTunnelKeepService()
-            }
+            scheduleAutoDisableAfterQuietTraffic()
         } else {
             VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; auto VPN disable is off")
+        }
+    }
+
+    private fun scheduleAutoDisableAfterQuietTraffic() {
+        val generation = autoDisableGeneration.incrementAndGet()
+        thread(name = "bsml-disable-after-quiet-traffic", start = true) {
+            var observedTrafficVersion = VpnLogRepository.significantTrafficVersionNow()
+            while (
+                active &&
+                !Thread.currentThread().isInterrupted &&
+                autoDisableGeneration.get() == generation
+            ) {
+                try {
+                    Thread.sleep(AUTO_DISABLE_QUIET_MS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@thread
+                }
+
+                val currentTrafficVersion = VpnLogRepository.significantTrafficVersionNow()
+                if (currentTrafficVersion == observedTrafficVersion) {
+                    VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; VPN interception disabled")
+                    disableVpnTunnelKeepService()
+                    return@thread
+                }
+                observedTrafficVersion = currentTrafficVersion
+            }
         }
     }
 
@@ -446,22 +615,20 @@ class LocalVpnService : VpnService() {
 
         fun tryStartSession(syn: PacketEvent): Boolean {
             val key = SessionKey.fromEvent(syn)
+            LatestFingerprintRepository.storeObservedGameServer(appContext, intToIpv4(key.serverIp))
             val existing = sessions[key]
             if (existing != null && !existing.isClosed()) {
                 existing.onDuplicateSyn(syn)
                 return true
             }
 
-            if (sessions.values.any { !it.isClosed() }) {
-                return false
-            }
-
             sessions[key]?.close()
+            val sessionState = InstallSessionState()
             sessions[key] = TcpProxySession(
                 key = key,
                 clientInitialSeq = syn.sequenceNumber,
                 clientWindow = syn.windowSize,
-                callbacks = createSessionCallbacks()
+                callbacks = createSessionCallbacks(sessionState)
             ).also { it.start() }
             return true
         }
@@ -483,6 +650,9 @@ class LocalVpnService : VpnService() {
     companion object {
         const val ACTION_START = "lilmuff1.bsml.action.START_VPN"
         const val ACTION_STOP = "lilmuff1.bsml.action.STOP_VPN"
+        const val EXTRA_CLEANUP_MODE = "lilmuff1.bsml.extra.CLEANUP_MODE"
+        const val EXTRA_CLEANUP_REASON_CODE = "lilmuff1.bsml.extra.CLEANUP_REASON_CODE"
+        const val EXTRA_CLEANUP_REASON_NAME = "lilmuff1.bsml.extra.CLEANUP_REASON_NAME"
 
         private const val MTU = 32767
         private const val TUN_ADDRESS = "10.10.10.2"
@@ -496,5 +666,6 @@ class LocalVpnService : VpnService() {
         private const val CLIENT_HELLO_ID = 10100
         private const val LOGIN_FAILED_ID = 0x4E87
         private const val ROOT_SHA_REWRITE_ENABLED = true
+        private const val AUTO_DISABLE_QUIET_MS = 5_000L
     }
 }

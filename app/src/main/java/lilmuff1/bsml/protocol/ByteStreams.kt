@@ -42,6 +42,21 @@ class ByteReader(private val bytes: ByteArray) {
         return value
     }
 
+    fun readVInt(): Int? {
+        var result = 0
+        var shift = 0
+        repeat(5) {
+            if (remaining() < 1) return null
+            val byte = bytes[offset++].toInt() and 0xFF
+            result = result or ((byte and 0x7F) shl shift)
+            if (byte and 0x80 == 0) {
+                return result
+            }
+            shift += 7
+        }
+        return null
+    }
+
     fun currentOffset(): Int = offset
 
     private fun remaining(): Int = bytes.size - offset
@@ -78,6 +93,19 @@ class ByteWriter {
         }
         writeInt(value.size)
         output.write(value)
+    }
+
+    fun writeVInt(value: Int) {
+        var current = value
+        while (true) {
+            val bits = current and 0x7F
+            current = current ushr 7
+            if (current == 0) {
+                output.write(bits)
+                return
+            }
+            output.write(bits or 0x80)
+        }
     }
 
     fun writeBytes(bytes: ByteArray) {
