@@ -38,8 +38,8 @@ object VpnLogRepository {
     private const val KEY_PORT_TEXT = "port_text"
     private const val KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED = "install_result_notifications_enabled"
     private const val KEY_LAST_CLIENT_VERSION = "last_client_version"
+    private const val KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE = "show_reinstall_warning_after_delete"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
-    private val cleanupDeleteReason = CleanupReasonSpec(8, "CLIENT_UPDATE_AVAILABLE")
 
     private val logLock = Any()
     private val significantTrafficVersion = AtomicLong(0)
@@ -88,6 +88,12 @@ object VpnLogRepository {
     private val _lastClientVersion = MutableStateFlow<String?>(null)
     val lastClientVersion = _lastClientVersion.asStateFlow()
 
+    private val _showReinstallWarningAfterDelete = MutableStateFlow(true)
+    val showReinstallWarningAfterDelete = _showReinstallWarningAfterDelete.asStateFlow()
+
+    private val _deleteCleanupPending = MutableStateFlow(false)
+    val deleteCleanupPending = _deleteCleanupPending.asStateFlow()
+
     fun initialize(context: Context) {
         if (preferencesLoaded) return
         synchronized(this) {
@@ -106,6 +112,7 @@ object VpnLogRepository {
                 ?: GAME_PORT.toString()
             _isInstallResultNotificationsEnabled.value = prefs.getBoolean(KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED, false)
             _lastClientVersion.value = prefs.getString(KEY_LAST_CLIENT_VERSION, null)?.trim()?.ifEmpty { null }
+            _showReinstallWarningAfterDelete.value = prefs.getBoolean(KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE, true)
             preferencesLoaded = true
         }
     }
@@ -221,6 +228,27 @@ object VpnLogRepository {
         updatePreference(context) { putString(KEY_LAST_CLIENT_VERSION, normalized) }
     }
 
+    fun setShowReinstallWarningAfterDelete(isEnabled: Boolean) {
+        _showReinstallWarningAfterDelete.value = isEnabled
+    }
+
+    fun setShowReinstallWarningAfterDelete(context: Context, isEnabled: Boolean) {
+        setShowReinstallWarningAfterDelete(isEnabled)
+        updatePreference(context) { putBoolean(KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE, isEnabled) }
+    }
+
+    fun shouldShowReinstallWarningAfterDeleteNow(): Boolean = _showReinstallWarningAfterDelete.value
+
+    fun markDeleteCleanupPending() {
+        _deleteCleanupPending.value = true
+    }
+
+    fun clearDeleteCleanupPending() {
+        _deleteCleanupPending.value = false
+    }
+
+    fun isDeleteCleanupPendingNow(): Boolean = _deleteCleanupPending.value
+
     fun captureSettingsNow(): VpnCaptureSettings {
         val port = _portText.value.toIntOrNull()
             ?.takeIf { it in 1..65535 }
@@ -235,8 +263,6 @@ object VpnLogRepository {
     }
 
     fun cleanupWarmupReason(): CleanupReasonSpec = cleanupWarmupReason
-
-    fun cleanupDeleteReason(): CleanupReasonSpec = cleanupDeleteReason
 
     fun clearLogs() {
         _logs.value = emptyList()

@@ -70,9 +70,6 @@ class LocalVpnService : VpnService() {
     private var cleanupWarmupSent = false
 
     @Volatile
-    private var cleanupZeroVersionPending = false
-
-    @Volatile
     private var cleanupNormalHashSeen = false
 
     private val autoDisableGeneration = AtomicInteger(0)
@@ -126,8 +123,10 @@ class LocalVpnService : VpnService() {
         this.cleanupReasonCode = cleanupReasonCode
         this.cleanupReasonName = cleanupReasonName
         cleanupWarmupSent = false
-        cleanupZeroVersionPending = false
         cleanupNormalHashSeen = false
+        if (cleanupMode) {
+            VpnLogRepository.markDeleteCleanupPending()
+        }
         installLoginFailedTemplateBody = null
         installLoginFailedTemplateVersion = 11
         installLoginFailedTemplateClientHash = null
@@ -484,11 +483,9 @@ class LocalVpnService : VpnService() {
                 VpnLogRepository.setLastClientVersion(appContext, version)
             }
 
-            override fun shouldZeroClientHelloGameVersion(): Boolean = cleanupModeEnabled && cleanupZeroVersionPending
+            override fun shouldZeroClientHelloGameVersion(): Boolean = false
 
-            override fun onClientHelloGameVersionZeroApplied() {
-                cleanupZeroVersionPending = false
-            }
+            override fun onClientHelloGameVersionZeroApplied() = Unit
 
             override fun onFinalOriginalClientHello(contentHash: String) {
                 handleFinalOriginalClientHello(contentHash, sessionState)
@@ -529,7 +526,6 @@ class LocalVpnService : VpnService() {
         val result = if (cleanupModeEnabled) {
             if (!cleanupWarmupSent) {
                 cleanupWarmupSent = true
-                cleanupZeroVersionPending = true
                 loginFailedRewriter.rewriteCleanup(
                     body = body,
                     reasonCode = 7,
@@ -568,7 +564,52 @@ class LocalVpnService : VpnService() {
         clientHelloLog: String,
         sessionState: InstallSessionState
     ): ByteArray? {
-        if (cleanupModeEnabled) return null
+        if (cleanupModeEnabled) {
+            if (InstallFlowRepository.wasFinalClientHelloSeen()) return null
+            val rewriteStartedAt = System.nanoTime()
+            val isPatchedHash = contentHash.startsWith(PATCH_NAMESPACE)
+            val isWarmup = !isPatchedHash
+            if (isWarmup && cleanupWarmupSent) return null
+            val template = if (isPatchedHash) {
+                installLoginFailedTemplateBody ?: return null
+            } else {
+                val cached = loadInstallLoginFailedTemplate(contentHash) ?: return null
+                installLoginFailedTemplateBody = cached.body
+                installLoginFailedTemplateVersion = cached.version
+                installLoginFailedTemplateClientHash = cached.clientHelloHash
+                cached.body
+            }
+            val version = installLoginFailedTemplateVersion
+            val reasonCode = if (isWarmup) 7 else 1
+            val reasonName = if (isWarmup) "CLIENT_CONTENT_UPDATE" else "LOGIN_FAILED"
+            val reasonText = if (isWarmup) {
+                "BSML cleanup warmup"
+            } else {
+                getString(R.string.message_restart_game_to_remove_mods)
+            }
+            if (isWarmup) {
+                cleanupWarmupSent = true
+            }
+            VpnLogRepository.log(clientHelloLog)
+            val result = loginFailedRewriter.rewriteCleanup(
+                body = template,
+                reasonCode = reasonCode,
+                reasonName = reasonName,
+                reasonText = reasonText,
+                forceRewriteFingerprint = isWarmup
+            )
+            handleLoginFailedRewriteResult(result, sessionState)
+            val body = result.body
+            VpnLogRepository.log(
+                formatLoginFailedLog(
+                    result = result,
+                    oldLength = template.size,
+                    newLength = body.size,
+                    version = version
+                ) + " source=local-cleanup-template rewriteMs=${elapsedMs(rewriteStartedAt)}"
+            )
+            return buildSupercellMessage(LOGIN_FAILED_ID, body, version)
+        }
         if (InstallFlowRepository.wasFinalClientHelloSeen()) return null
         val isPatchedHash = contentHash.startsWith(PATCH_NAMESPACE)
         val template = if (isPatchedHash) {
@@ -707,6 +748,15 @@ class LocalVpnService : VpnService() {
         if (cleanupModeEnabled && !cleanupNormalHashSeen && !contentHash.startsWith(PATCH_NAMESPACE)) {
             cleanupNormalHashSeen = true
             VpnLogRepository.log("SC cleanup normal CLIENT_HELLO restored contentHash=$contentHash")
+            InstallFlowRepository.markFinalClientHelloSeen()
+            VpnLogRepository.clearDeleteCleanupPending()
+            if (VpnLogRepository.isAutoVpnDisableEnabledNow()) {
+                VpnLogRepository.log("SC cleanup normal CLIENT_HELLO; VPN interception disabled")
+                disableVpnTunnelKeepService()
+            } else {
+                VpnLogRepository.log("SC cleanup normal CLIENT_HELLO; auto VPN disable is off")
+            }
+            return
         }
         val originalRootSha = sessionState.originalAssetRootSha
             ?: InstallFlowRepository.getOriginalRootSha()
@@ -726,7 +776,10 @@ class LocalVpnService : VpnService() {
         }
         VpnLogRepository.log("SC final CLIENT_HELLO detected contentHash=$contentHash")
         InstallFlowRepository.markFinalClientHelloSeen()
-        if (!cleanupModeEnabled) {
+        if (cleanupModeEnabled) {
+            VpnLogRepository.clearDeleteCleanupPending()
+        } else {
+            VpnLogRepository.clearDeleteCleanupPending()
             if (InstallFlowRepository.tryMarkInstallResultNotified()) {
                 VpnNotificationFactory.notifyInstallResult(
                     context = this,

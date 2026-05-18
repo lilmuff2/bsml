@@ -14,7 +14,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import lilmuff1.bsml.modpatch.NbAssetsCompiler
 import lilmuff1.bsml.service.LoginFailedRewritePrewarmer
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,7 +53,9 @@ object ModFilesRepository {
     private const val PREFS_NAME = "mod_files_repository"
     private const val KEY_TREE_URI = "tree_uri"
     private const val PREPARED_INDEX_FILE = "prepared_mod_index.json"
+    private const val PREPARED_FILES_DIR = "prepared_mod_files"
     private val prepareDispatcher = Dispatchers.IO.limitedParallelism(PREPARE_FILE_PARALLELISM)
+    private val prepareMutex = Mutex()
 
     private val _preparation = MutableStateFlow(ModPreparationState())
     val preparation = _preparation.asStateFlow()
@@ -87,7 +92,13 @@ object ModFilesRepository {
     }
 
     fun refreshState(context: Context) {
-        val folderName = getDisplayName(context)
+        ImportedModRepository.refreshState(context)
+        refreshPreparedStateFromImportedMod(context)
+    }
+
+    fun refreshPreparedStateFromImportedMod(context: Context) {
+        val imported = ImportedModRepository.state.value
+        val folderName = imported.metadata?.title ?: imported.fileName ?: getDisplayName(context)
         val prepared = listPreparedFiles(context)
         _preparation.value = ModPreparationState(
             folderName = folderName,
@@ -111,107 +122,114 @@ object ModFilesRepository {
         return result.sortedBy { it.path }
     }
 
-    suspend fun prepareFiles(context: Context): Boolean = withContext(Dispatchers.IO) {
-        val folderName = getDisplayName(context)
-        if (folderName == null) {
-            _preparation.value = ModPreparationState(error = "folder_not_selected")
-            return@withContext false
-        }
+    suspend fun prepareFiles(context: Context): Boolean = prepareMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val activeArchive = ImportedModRepository.activeArchiveFile(context)
+            if (activeArchive.isFile) {
+                return@withContext prepareImportedArchive(context, activeArchive)
+            }
 
-        _preparation.value = ModPreparationState(
-            folderName = folderName,
-            isPreparing = true,
-            preparedCount = 0,
-            totalCount = 0,
-            isReady = false,
-            error = null
-        )
+            val folderName = getDisplayName(context)
+            if (folderName == null) {
+                _preparation.value = ModPreparationState(error = "folder_not_selected")
+                return@withContext false
+            }
 
-        val sourceFiles = listFilesParallel(context)
-        val existingPreparedList = listPreparedFiles(context)
-        if (matchesSnapshot(existingPreparedList, sourceFiles)) {
             _preparation.value = ModPreparationState(
                 folderName = folderName,
-                isPreparing = false,
-                preparedCount = existingPreparedList.size,
-                totalCount = existingPreparedList.size,
-                isReady = existingPreparedList.isNotEmpty(),
+                isPreparing = true,
+                preparedCount = 0,
+                totalCount = 0,
+                isReady = false,
                 error = null
             )
-            return@withContext existingPreparedList.isNotEmpty()
-        }
 
-        val existingPrepared = existingPreparedList.associateBy { it.path }
-        _preparation.value = ModPreparationState(
-            folderName = folderName,
-            isPreparing = true,
-            preparedCount = 0,
-            totalCount = sourceFiles.size,
-            isReady = false,
-            error = null
-        )
+            val sourceFiles = listFilesParallel(context)
+            val existingPreparedList = listPreparedFiles(context)
+            if (matchesSnapshot(existingPreparedList, sourceFiles)) {
+                _preparation.value = ModPreparationState(
+                    folderName = folderName,
+                    isPreparing = false,
+                    preparedCount = existingPreparedList.size,
+                    totalCount = existingPreparedList.size,
+                    isReady = existingPreparedList.isNotEmpty(),
+                    error = null
+                )
+                return@withContext existingPreparedList.isNotEmpty()
+            }
 
-        val completedCount = AtomicInteger(0)
-        val preparedFiles = coroutineScope {
-            sourceFiles.map { file ->
-                async(prepareDispatcher) {
-                    val cached = existingPrepared[file.path]
-                    val sha = if (cached != null && cached.matches(file)) {
-                        cached.sha
-                    } else {
-                        runCatching {
-                            context.contentResolver.openInputStream(file.uri)?.use { input ->
-                                sha1Hex(input)
-                            }
-                        }.getOrNull()
-                    }
-                    val completed = completedCount.incrementAndGet()
-                    _preparation.value = ModPreparationState(
-                        folderName = folderName,
-                        isPreparing = true,
-                        preparedCount = completed,
-                        totalCount = sourceFiles.size,
-                        isReady = false,
-                        error = null
-                    )
-                    if (sha == null) {
-                        null
-                    } else {
-                        PreparedModFile(
-                            path = file.path,
-                            sha = sha,
-                            uri = file.uri.toString(),
-                            size = file.size,
-                            lastModified = file.lastModified
+            val existingPrepared = existingPreparedList.associateBy { it.path }
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = true,
+                preparedCount = 0,
+                totalCount = sourceFiles.size,
+                isReady = false,
+                error = null
+            )
+
+            val completedCount = AtomicInteger(0)
+            val preparedFiles = coroutineScope {
+                sourceFiles.map { file ->
+                    async(prepareDispatcher) {
+                        val cached = existingPrepared[file.path]
+                        val sha = if (cached != null && cached.matches(file)) {
+                            cached.sha
+                        } else {
+                            runCatching {
+                                context.contentResolver.openInputStream(file.uri)?.use { input ->
+                                    sha1Hex(input)
+                                }
+                            }.getOrNull()
+                        }
+                        val completed = completedCount.incrementAndGet()
+                        _preparation.value = ModPreparationState(
+                            folderName = folderName,
+                            isPreparing = true,
+                            preparedCount = completed,
+                            totalCount = sourceFiles.size,
+                            isReady = false,
+                            error = null
                         )
+                        if (sha == null) {
+                            null
+                        } else {
+                            PreparedModFile(
+                                path = file.path,
+                                sha = sha,
+                                uri = file.uri.toString(),
+                                size = file.size,
+                                lastModified = file.lastModified
+                            )
+                        }
                     }
-                }
-            }.awaitAll()
-        }
-        val failedIndex = preparedFiles.indexOfFirst { it == null }
-        if (failedIndex >= 0) {
+                }.awaitAll()
+            }
+            val failedIndex = preparedFiles.indexOfFirst { it == null }
+            if (failedIndex >= 0) {
+                _preparation.value = ModPreparationState(
+                    folderName = folderName,
+                    isPreparing = false,
+                    preparedCount = failedIndex,
+                    totalCount = sourceFiles.size,
+                    isReady = false,
+                    error = sourceFiles[failedIndex].path
+                )
+                return@withContext false
+            }
+
+            writePreparedIndex(context, preparedFiles.filterNotNull())
             _preparation.value = ModPreparationState(
                 folderName = folderName,
                 isPreparing = false,
-                preparedCount = failedIndex,
-                totalCount = sourceFiles.size,
-                isReady = false,
-                error = sourceFiles[failedIndex].path
+                preparedCount = preparedFiles.size,
+                totalCount = preparedFiles.size,
+                isReady = true,
+                error = null
             )
-            return@withContext false
+            LoginFailedRewritePrewarmer.prewarm(context)
+            true
         }
-
-        writePreparedIndex(context, preparedFiles.filterNotNull())
-        _preparation.value = ModPreparationState(
-            folderName = folderName,
-            isPreparing = false,
-            preparedCount = preparedFiles.size,
-            totalCount = preparedFiles.size,
-            isReady = true,
-            error = null
-        )
-        LoginFailedRewritePrewarmer.prewarm(context)
-        true
     }
 
     fun listPreparedFiles(context: Context): List<PreparedModFile> {
@@ -276,10 +294,63 @@ object ModFilesRepository {
         return signature
     }
 
-    private fun clearPreparedFiles(context: Context) {
+    fun clearPreparedFiles(context: Context) {
         preparedFilesCache = emptyList()
         preparedStateSignature = ""
         File(context.filesDir, PREPARED_INDEX_FILE).delete()
+        File(context.filesDir, PREPARED_FILES_DIR).deleteRecursively()
+    }
+
+    private suspend fun prepareImportedArchive(context: Context, archive: File): Boolean = withContext(Dispatchers.IO) {
+        ImportedModRepository.refreshState(context)
+        val imported = ImportedModRepository.state.value
+        val folderName = imported.metadata?.title ?: imported.fileName ?: archive.name
+        _preparation.value = ModPreparationState(
+            folderName = folderName,
+            isPreparing = true,
+            preparedCount = 0,
+            totalCount = 0,
+            isReady = false,
+            error = null
+        )
+        runCatching {
+            val prepared = if (imported.isEnabled) {
+                NbAssetsCompiler(
+                    context = context,
+                    enabledFeatureIds = imported.featureSelection.enabledFeatureIds
+                ).compile(
+                    archive = archive,
+                    outputDir = File(context.filesDir, PREPARED_FILES_DIR)
+                )
+            } else {
+                File(context.filesDir, PREPARED_FILES_DIR).deleteRecursively()
+                emptyList()
+            }
+            writePreparedIndex(context, prepared)
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = false,
+                preparedCount = prepared.size,
+                totalCount = prepared.size,
+                isReady = prepared.isNotEmpty(),
+                error = null
+            )
+            LoginFailedRewritePrewarmer.prewarm(context)
+            prepared.isNotEmpty()
+        }.getOrElse { error ->
+            VpnLogRepository.log(
+                "NBASSETS prepare failed error=${error::class.java.simpleName}: ${error.message ?: "unknown"}"
+            )
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = false,
+                preparedCount = 0,
+                totalCount = 0,
+                isReady = false,
+                error = error.message ?: error::class.java.simpleName
+            )
+            false
+        }
     }
 
     private fun writePreparedIndex(context: Context, files: List<PreparedModFile>) {
