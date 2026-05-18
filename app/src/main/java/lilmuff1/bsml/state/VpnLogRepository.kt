@@ -37,6 +37,7 @@ object VpnLogRepository {
     private const val KEY_AUTO_LAUNCH_PACKAGE = "auto_launch_package"
     private const val KEY_PORT_TEXT = "port_text"
     private const val KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED = "install_result_notifications_enabled"
+    private const val KEY_LAST_CLIENT_VERSION = "last_client_version"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
     private val cleanupDeleteReason = CleanupReasonSpec(8, "CLIENT_UPDATE_AVAILABLE")
 
@@ -84,6 +85,9 @@ object VpnLogRepository {
     private val _isInstallResultNotificationsEnabled = MutableStateFlow(false)
     val isInstallResultNotificationsEnabled = _isInstallResultNotificationsEnabled.asStateFlow()
 
+    private val _lastClientVersion = MutableStateFlow<String?>(null)
+    val lastClientVersion = _lastClientVersion.asStateFlow()
+
     fun initialize(context: Context) {
         if (preferencesLoaded) return
         synchronized(this) {
@@ -101,6 +105,7 @@ object VpnLogRepository {
                 ?.ifEmpty { GAME_PORT.toString() }
                 ?: GAME_PORT.toString()
             _isInstallResultNotificationsEnabled.value = prefs.getBoolean(KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED, false)
+            _lastClientVersion.value = prefs.getString(KEY_LAST_CLIENT_VERSION, null)?.trim()?.ifEmpty { null }
             preferencesLoaded = true
         }
     }
@@ -109,7 +114,7 @@ object VpnLogRepository {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .apply(block)
-            .apply()
+            .commit()
     }
 
     fun setStatus(status: String) {
@@ -205,6 +210,16 @@ object VpnLogRepository {
     }
 
     fun isInstallResultNotificationsEnabledNow(): Boolean = _isInstallResultNotificationsEnabled.value
+
+    fun setLastClientVersion(version: String?) {
+        _lastClientVersion.value = version?.trim()?.ifEmpty { null }
+    }
+
+    fun setLastClientVersion(context: Context, version: String?) {
+        val normalized = version?.trim()?.ifEmpty { null }
+        setLastClientVersion(normalized)
+        updatePreference(context) { putString(KEY_LAST_CLIENT_VERSION, normalized) }
+    }
 
     fun captureSettingsNow(): VpnCaptureSettings {
         val port = _portText.value.toIntOrNull()

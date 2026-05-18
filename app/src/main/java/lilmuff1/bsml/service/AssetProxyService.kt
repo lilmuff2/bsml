@@ -32,11 +32,12 @@ class AssetProxyService : Service() {
         onFirstAssetRequest = {
         },
         onPatchedAssetServed = { path ->
-            InstallFlowRepository.onPatchedAssetServed(path)
+            InstallFlowRepository.onPatchedAssetServed(applicationContext, path)
         }
     )
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        VpnLogRepository.initialize(applicationContext)
         when (intent?.action) {
             ACTION_STOP -> stopProxy()
             ACTION_UPDATE_ORIGINS -> {

@@ -1,6 +1,7 @@
 package lilmuff1.bsml.service
 
 import lilmuff1.bsml.config.*
+import lilmuff1.bsml.protocol.buildSupercellMessage
 import lilmuff1.bsml.protocol.debugLog
 import lilmuff1.bsml.R
 import lilmuff1.bsml.state.InstallFlowRepository
@@ -19,13 +20,16 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.File
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import org.json.JSONObject
 
 class LocalVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -72,12 +76,21 @@ class LocalVpnService : VpnService() {
     private var cleanupNormalHashSeen = false
 
     private val autoDisableGeneration = AtomicInteger(0)
+    @Volatile
+    private var installLoginFailedTemplateBody: ByteArray? = null
+    @Volatile
+    private var installLoginFailedTemplateVersion: Int = 11
+    @Volatile
+    private var installLoginFailedTemplateClientHash: String? = null
+    private val localFirstLoginFailedInjected = AtomicBoolean(false)
+    private val localSecondLoginFailedInjected = AtomicBoolean(false)
 
     private class InstallSessionState {
         @Volatile var originalAssetRootSha: String? = null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        VpnLogRepository.initialize(applicationContext)
         try {
             when (intent?.action) {
                 ACTION_STOP -> stopVpn()
@@ -115,7 +128,12 @@ class LocalVpnService : VpnService() {
         cleanupWarmupSent = false
         cleanupZeroVersionPending = false
         cleanupNormalHashSeen = false
-        InstallFlowRepository.reset()
+        installLoginFailedTemplateBody = null
+        installLoginFailedTemplateVersion = 11
+        installLoginFailedTemplateClientHash = null
+        localFirstLoginFailedInjected.set(false)
+        localSecondLoginFailedInjected.set(false)
+        InstallFlowRepository.reset(appContext)
         autoDisableGeneration.incrementAndGet()
         VpnLogRepository.setStatus("Starting VPN...")
         VpnLogRepository.log(
@@ -447,7 +465,9 @@ class LocalVpnService : VpnService() {
                 proxyState.remove(key)
             }
 
-            override fun shouldRewriteContentHash(): Boolean = InstallFlowRepository.isContentHashRewriteEnabled()
+            override fun shouldRewriteContentHash(): Boolean =
+                InstallFlowRepository.isContentHashRewriteEnabled() &&
+                    !InstallFlowRepository.wasFinalClientHelloSeen()
 
             override fun onClientHelloContentHashObserved(contentHash: String) {
                 val normalized = contentHash.trim()
@@ -460,6 +480,10 @@ class LocalVpnService : VpnService() {
                 }
             }
 
+            override fun onClientHelloVersionObserved(version: String) {
+                VpnLogRepository.setLastClientVersion(appContext, version)
+            }
+
             override fun shouldZeroClientHelloGameVersion(): Boolean = cleanupModeEnabled && cleanupZeroVersionPending
 
             override fun onClientHelloGameVersionZeroApplied() {
@@ -470,18 +494,38 @@ class LocalVpnService : VpnService() {
                 handleFinalOriginalClientHello(contentHash, sessionState)
             }
 
-            override fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult {
-                return this@LocalVpnService.rewriteLoginFailedBody(body, sessionState)
+            override fun rewriteLoginFailedBody(body: ByteArray, version: Int): LoginFailedRewriteResult {
+                return this@LocalVpnService.rewriteLoginFailedBody(body, version, sessionState)
+            }
+
+            override fun maybeBuildLocalLoginFailedResponse(
+                contentHash: String,
+                clientHelloLog: String
+            ): ByteArray? {
+                return this@LocalVpnService.maybeBuildLocalLoginFailedResponse(
+                    contentHash = contentHash,
+                    clientHelloLog = clientHelloLog,
+                    sessionState = sessionState
+                )
             }
         }
     }
 
-    private fun rewriteLoginFailedBody(body: ByteArray, sessionState: InstallSessionState): LoginFailedRewriteResult {
+    private fun rewriteLoginFailedBody(body: ByteArray, version: Int, sessionState: InstallSessionState): LoginFailedRewriteResult {
+        if (InstallFlowRepository.wasFinalClientHelloSeen()) {
+            return LoginFailedRewriteResult(body, FingerprintHashes(null, null), FingerprintPatchStats())
+        }
         val currentClientHash = InstallFlowRepository.getCurrentClientHelloHash()
         val currentHashAlreadyPatched = currentClientHash?.startsWith(PATCH_NAMESPACE) == true
         val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED &&
             !InstallFlowRepository.wasRootShaRewriteApplied() &&
             !currentHashAlreadyPatched
+        if (!cleanupModeEnabled && shouldPatchRootFingerprintSha) {
+            currentClientHash?.let { hash ->
+                storeInstallLoginFailedTemplate(body, version, hash)
+            }
+            localSecondLoginFailedInjected.set(false)
+        }
         val result = if (cleanupModeEnabled) {
             if (!cleanupWarmupSent) {
                 cleanupWarmupSent = true
@@ -515,6 +559,112 @@ class LocalVpnService : VpnService() {
                 currentClientHelloHash = currentClientHash
             )
         }
+        handleLoginFailedRewriteResult(result, sessionState)
+        return result
+    }
+
+    private fun maybeBuildLocalLoginFailedResponse(
+        contentHash: String,
+        clientHelloLog: String,
+        sessionState: InstallSessionState
+    ): ByteArray? {
+        if (cleanupModeEnabled) return null
+        if (InstallFlowRepository.wasFinalClientHelloSeen()) return null
+        val isPatchedHash = contentHash.startsWith(PATCH_NAMESPACE)
+        val template = if (isPatchedHash) {
+            if (!localSecondLoginFailedInjected.compareAndSet(false, true)) return null
+            installLoginFailedTemplateBody ?: return null
+        } else {
+            if (InstallFlowRepository.wasRootShaRewriteApplied()) return null
+            val cached = loadInstallLoginFailedTemplate(contentHash) ?: return null
+            if (!localFirstLoginFailedInjected.compareAndSet(false, true)) return null
+            installLoginFailedTemplateBody = cached.body
+            installLoginFailedTemplateVersion = cached.version
+            installLoginFailedTemplateClientHash = cached.clientHelloHash
+            cached.body
+        }
+        val version = installLoginFailedTemplateVersion
+        val rewriteStartedAt = System.nanoTime()
+        VpnLogRepository.log(clientHelloLog)
+        val result = loginFailedRewriter.rewrite(
+            body = template,
+            shouldPatchRootFingerprintSha = !isPatchedHash,
+            includeTriggerAsset = isPatchedHash,
+            currentClientHelloHash = contentHash
+        )
+        handleLoginFailedRewriteResult(result, sessionState)
+        val body = result.body
+        VpnLogRepository.log(
+            formatLoginFailedLog(
+                result = result,
+                oldLength = template.size,
+                newLength = body.size,
+                version = version
+            ) + " source=${if (isPatchedHash) "cache" else "disk-cache"} rewriteMs=${elapsedMs(rewriteStartedAt)}"
+        )
+        return buildSupercellMessage(LOGIN_FAILED_ID, body, version)
+    }
+
+    private fun storeInstallLoginFailedTemplate(body: ByteArray, version: Int, clientHelloHash: String) {
+        val normalizedHash = clientHelloHash.trim()
+        if (normalizedHash.isEmpty() || normalizedHash.startsWith(PATCH_NAMESPACE)) return
+        installLoginFailedTemplateBody = body.copyOf()
+        installLoginFailedTemplateVersion = version
+        installLoginFailedTemplateClientHash = normalizedHash
+        runCatching {
+            val dir = installTemplateDir()
+            dir.mkdirs()
+            File(dir, INSTALL_TEMPLATE_BODY_FILE).writeBytes(body)
+            File(dir, INSTALL_TEMPLATE_META_FILE).writeText(
+                JSONObject()
+                    .put("version", version)
+                    .put("clientHelloHash", normalizedHash)
+                    .toString()
+            )
+        }.onFailure { error ->
+            VpnLogRepository.log("SC LOGIN_FAILED template save failed ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
+        }
+    }
+
+    private fun loadInstallLoginFailedTemplate(clientHelloHash: String): InstallLoginFailedTemplate? {
+        val normalizedHash = clientHelloHash.trim()
+        if (normalizedHash.isEmpty() || normalizedHash.startsWith(PATCH_NAMESPACE)) return null
+        val memoryBody = installLoginFailedTemplateBody
+        if (memoryBody != null && installLoginFailedTemplateClientHash == normalizedHash) {
+            return InstallLoginFailedTemplate(
+                body = memoryBody,
+                version = installLoginFailedTemplateVersion,
+                clientHelloHash = normalizedHash
+            )
+        }
+        return runCatching {
+            val dir = installTemplateDir()
+            val metaFile = File(dir, INSTALL_TEMPLATE_META_FILE)
+            val bodyFile = File(dir, INSTALL_TEMPLATE_BODY_FILE)
+            if (!metaFile.isFile || !bodyFile.isFile) return@runCatching null
+            val meta = JSONObject(metaFile.readText())
+            val storedHash = meta.optString("clientHelloHash", "").trim()
+            if (storedHash != normalizedHash) return@runCatching null
+            InstallLoginFailedTemplate(
+                body = bodyFile.readBytes(),
+                version = meta.optInt("version", 11),
+                clientHelloHash = storedHash
+            )
+        }.getOrNull()
+    }
+
+    private fun installTemplateDir(): File = File(filesDir, INSTALL_TEMPLATE_DIR)
+
+    private data class InstallLoginFailedTemplate(
+        val body: ByteArray,
+        val version: Int,
+        val clientHelloHash: String
+    )
+
+    private fun handleLoginFailedRewriteResult(
+        result: LoginFailedRewriteResult,
+        sessionState: InstallSessionState
+    ) {
         if (result.assetUrlRewritten) {
             InstallFlowRepository.disableContentHashRewrite()
         }
@@ -537,7 +687,6 @@ class LocalVpnService : VpnService() {
         if (result.rootShaRewriteApplied) {
             InstallFlowRepository.markRootShaRewriteApplied()
         }
-        return result
     }
 
     private fun handleOriginalRootAfterPatch(rootSha: String?, sessionState: InstallSessionState) {
@@ -576,18 +725,20 @@ class LocalVpnService : VpnService() {
             return
         }
         VpnLogRepository.log("SC final CLIENT_HELLO detected contentHash=$contentHash")
+        InstallFlowRepository.markFinalClientHelloSeen()
         if (!cleanupModeEnabled) {
             if (InstallFlowRepository.tryMarkInstallResultNotified()) {
                 VpnNotificationFactory.notifyInstallResult(
                     context = this,
-                    patchedCount = InstallFlowRepository.servedPatchedCount(),
+                    patchedCount = InstallFlowRepository.servedPatchedCount(appContext),
                     totalCount = ModFilesRepository.listPreparedPaths(appContext).size
                 )
-                VpnLogRepository.log("SC install result notification sent patched=${InstallFlowRepository.servedPatchedCount()}")
+                VpnLogRepository.log("SC install result notification sent patched=${InstallFlowRepository.servedPatchedCount(appContext)}")
             }
         }
         if (VpnLogRepository.isAutoVpnDisableEnabledNow()) {
-            scheduleAutoDisableAfterQuietTraffic()
+            VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; VPN interception disabled")
+            disableVpnTunnelKeepService()
         } else {
             VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; auto VPN disable is off")
         }
@@ -675,7 +826,14 @@ class LocalVpnService : VpnService() {
         private const val MAX_TCP_PAYLOAD = 1400
         private const val CLIENT_HELLO_ID = 10100
         private const val LOGIN_FAILED_ID = 0x4E87
+        private const val INSTALL_TEMPLATE_DIR = "login_failed_install_template"
+        private const val INSTALL_TEMPLATE_BODY_FILE = "body.bin"
+        private const val INSTALL_TEMPLATE_META_FILE = "meta.json"
         private const val ROOT_SHA_REWRITE_ENABLED = true
         private const val AUTO_DISABLE_QUIET_MS = 5_000L
     }
+}
+
+private fun elapsedMs(startedAtNanos: Long): String {
+    return String.format(java.util.Locale.US, "%.3f", (System.nanoTime() - startedAtNanos) / 1_000_000.0)
 }

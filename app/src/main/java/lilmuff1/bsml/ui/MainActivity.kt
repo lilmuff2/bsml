@@ -17,6 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,11 +31,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -80,7 +89,9 @@ import lilmuff1.bsml.state.LatestFingerprintRepository
 import lilmuff1.bsml.state.ModFilesRepository
 import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.ui.theme.BSMLTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
 
 private data class LaunchableAppOption(
@@ -92,6 +103,7 @@ private data class LaunchableAppOption(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        VpnLogRepository.initialize(this)
         enableEdgeToEdge()
         setContent {
             BSMLTheme {
@@ -121,7 +133,6 @@ private fun MainScreen() {
     var pendingCleanupReason by remember { mutableStateOf<CleanupReasonSpec?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var pendingManualLaunchHint by remember { mutableStateOf<PendingManualLaunchHint?>(null) }
-    val modFolderLabel = stringResource(R.string.label_mod_folder)
     val modFolderNotSelected = stringResource(R.string.value_mod_folder_not_selected)
     val stopLabel = stringResource(R.string.button_stop)
     val installLabel = stringResource(R.string.button_install_mod)
@@ -138,9 +149,10 @@ private fun MainScreen() {
     val isInstallEnabled = !isRunning && selectedModFolderName != null
 
     LaunchedEffect(context) {
-        VpnLogRepository.initialize(context)
-        ModFilesRepository.refreshState(context)
-        LatestFingerprintRepository.refreshState(context)
+        withContext(Dispatchers.IO) {
+            ModFilesRepository.refreshState(context)
+            LatestFingerprintRepository.refreshState(context)
+        }
     }
 
     val launchableApps by remember(context, packageText) {
@@ -282,83 +294,86 @@ private fun MainScreen() {
                 horizontalAlignment = Alignment.Start,
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.app_name),
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Локальный VPN и прокси для установки и удаления модов",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        enabled = !latestFingerprintState.isFetching,
-                        onClick = { showSettings = true }
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f), CircleShape),
-                            contentAlignment = Alignment.Center
+                SectionCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "⚙",
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.app_name),
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Локальный VPN и прокси для установки и удаления модов",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            SettingsGearButton(
+                                enabled = !latestFingerprintState.isFetching,
+                                onClick = { showSettings = true }
                             )
                         }
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
-                        .padding(18.dp)
-                ) {
+                SectionCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionTitle("Что делать")
+                        GuidanceStep(number = 1, text = "Выбери папку мода и дождись подготовки файлов")
+                        GuidanceStep(number = 2, text = "Нажми установить или удалить мод")
+                        GuidanceStep(number = 3, text = if (autoLaunchPackage != null) "Игра запустится автоматически, дождись входа в меню. При большом моде это может занять заметное время" else "Открой игру вручную и дождись входа в меню. При большом моде это может занять заметное время")
+                    }
+                }
+
+                SectionCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SectionTitle("Мод")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "$modFolderLabel: ${selectedModFolderName ?: modFolderNotSelected}",
+                                text = selectedModFolderName ?: modFolderNotSelected,
                                 modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyLarge
+                                style = MaterialTheme.typography.headlineSmall.copy(lineHeight = 30.sp),
+                                fontWeight = FontWeight.SemiBold
                             )
                             if (selectedModFolderName != null) {
                                 IconButton(
                                     enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = { ModFilesRepository.setTreeUri(context, null) }
+                                    onClick = { ModFilesRepository.setTreeUri(context, null) },
+                                    modifier = Modifier.size(44.dp)
                                 ) {
-                                    Text("×", style = MaterialTheme.typography.titleLarge)
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = stringResource(R.string.button_clear_mod_folder),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(26.dp)
+                                    )
                                 }
                             }
                         }
-
                         if (selectedModFolderName == null) {
                             OutlinedButton(
                                 enabled = !isRunning && !preparation.isPreparing,
                                 onClick = { folderPickerLauncher.launch(null) },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
                             ) {
                                 Text(stringResource(R.string.button_select_mod_folder))
                             }
                         }
-
                         when {
                             preparation.isPreparing -> {
+                                Text(
+                                    text = preparingLabel,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                                 if (preparation.totalCount > 0) {
                                     CleanLinearProgressIndicator(
                                         progress = preparation.progress,
@@ -369,37 +384,15 @@ private fun MainScreen() {
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
-                                Text(
-                                    text = if (preparation.totalCount > 0) {
-                                        "$preparingLabel ${preparation.preparedCount}/${preparation.totalCount}"
-                                    } else {
-                                        preparingLabel
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                            preparation.error != null -> {
-                                StatusRow(
-                                    text = "$errorPrefix ${preparation.error}",
-                                    color = MaterialTheme.colorScheme.error,
-                                    enabled = !isRunning && selectedModFolderName != null,
-                                    onRefresh = {
-                                        scope.launch { ModFilesRepository.prepareFiles(context) }
-                                    }
-                                )
-                            }
-                            selectedModFolderName != null && preparation.isReady -> {
-                                StatusRow(
-                                    text = "$readyLabel ${preparation.preparedCount}",
-                                    enabled = !isRunning,
-                                    onRefresh = {
-                                        scope.launch { ModFilesRepository.prepareFiles(context) }
-                                    }
-                                )
                             }
                             selectedModFolderName != null -> {
                                 StatusRow(
-                                    text = emptyLabel,
+                                    text = when {
+                                        preparation.error != null -> "$errorPrefix ${preparation.error}"
+                                        preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
+                                        else -> emptyLabel
+                                    },
+                                    color = if (preparation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                                     enabled = !isRunning,
                                     onRefresh = {
                                         scope.launch { ModFilesRepository.prepareFiles(context) }
@@ -407,7 +400,12 @@ private fun MainScreen() {
                                 )
                             }
                         }
+                    }
+                }
 
+                SectionCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionTitle("Действия")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -430,19 +428,28 @@ private fun MainScreen() {
                                 },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(58.dp),
-                                shape = RoundedCornerShape(18.dp),
+                                    .height(54.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             ) {
-                                Text("✕", style = MaterialTheme.typography.titleMedium)
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = stringResource(R.string.button_remove_mod),
+                                    modifier = Modifier.size(24.dp)
+                                )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text(stringResource(R.string.button_remove_mod))
+                                Text(
+                                    text = stringResource(R.string.button_remove_mod),
+                                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                             Button(
-                                enabled = isRunning || isInstallEnabled,
+                                enabled = isRunning || (isInstallEnabled && !preparation.isPreparing),
                                 onClick = {
                                     if (isRunning) {
                                         stopMonitoring(context)
@@ -458,28 +465,31 @@ private fun MainScreen() {
                                     }
                                 },
                                 modifier = Modifier
-                                    .weight(1.2f)
-                                    .height(58.dp),
-                                shape = RoundedCornerShape(18.dp),
+                                    .weight(1f)
+                                    .height(54.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             ) {
-                                Text(
-                                    text = if (isRunning) "■" else "↓",
-                                    style = MaterialTheme.typography.titleMedium
+                                Icon(
+                                    imageVector = if (isRunning) Icons.Rounded.Stop else Icons.Rounded.Download,
+                                    contentDescription = if (isRunning) stopLabel else installLabel,
+                                    modifier = Modifier.size(24.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(
-                                    text = if (isRunning) stopLabel else if (preparation.isPreparing) preparingLabel else installLabel,
-                                    style = MaterialTheme.typography.titleMedium,
+                                    text = if (isRunning) stopLabel else installLabel,
+                                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
                                     fontWeight = FontWeight.Bold
                                 )
                             }
                         }
                     }
                 }
+
             }
         }
     }
@@ -504,12 +514,184 @@ private fun StatusRow(
         Text(
             text = text,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge,
             color = color
         )
-        IconButton(enabled = enabled, onClick = onRefresh) {
-            Text("↻", style = MaterialTheme.typography.headlineSmall)
+        IconButton(
+            enabled = enabled,
+            onClick = onRefresh,
+            modifier = Modifier.size(44.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Refresh,
+                contentDescription = stringResource(R.string.button_refresh_mod_files),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(26.dp)
+            )
         }
+    }
+}
+
+@Composable
+private fun SectionCard(
+    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+    contentPadding: androidx.compose.ui.unit.Dp = 18.dp,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(containerColor)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                RoundedCornerShape(24.dp)
+            )
+            .padding(contentPadding)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold
+    )
+}
+
+@Composable
+private fun LabeledValue(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge
+        )
+    }
+}
+
+@Composable
+private fun QuickInfoChip(label: String) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.75f))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun InfoPill(text: String, emphasized: Boolean) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(
+                if (emphasized) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                } else {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+                }
+            )
+            .border(
+                1.dp,
+                if (emphasized) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+                RoundedCornerShape(999.dp)
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (emphasized) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun GuidanceStep(number: Int, text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = number.toString(),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Text(
+            text = text,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun SettingsGearButton(enabled: Boolean, onClick: () -> Unit) {
+    IconButton(enabled = enabled, onClick = onClick) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Settings,
+                contentDescription = stringResource(R.string.title_settings),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled
+        )
     }
 }
 
@@ -549,40 +731,28 @@ private fun SettingsDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = stringResource(R.string.label_install_result_notifications),
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Switch(
-                        checked = isInstallResultNotificationsEnabled,
-                        onCheckedChange = onInstallResultNotificationsChange
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = stringResource(R.string.label_auto_disable_vpn),
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Switch(
-                        checked = isAutoVpnDisableEnabled,
-                        onCheckedChange = { VpnLogRepository.setAutoVpnDisableEnabled(context, it) }
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = stringResource(R.string.label_ip_filter),
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Switch(
-                        checked = isIpFilterEnabled,
-                        onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
-                        enabled = !isRunning
-                    )
-                }
+                SectionTitle("Поведение")
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_install_result_notifications),
+                    checked = isInstallResultNotificationsEnabled,
+                    onCheckedChange = onInstallResultNotificationsChange
+                )
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_auto_disable_vpn),
+                    checked = isAutoVpnDisableEnabled,
+                    onCheckedChange = { VpnLogRepository.setAutoVpnDisableEnabled(context, it) }
+                )
+                Text(
+                    text = stringResource(R.string.hint_auto_disable_vpn),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_ip_filter),
+                    checked = isIpFilterEnabled,
+                    onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
+                    enabled = !isRunning
+                )
                 if (isIpFilterEnabled) {
                     ArrayTextField(
                         value = ipFilterText,
@@ -607,10 +777,12 @@ private fun SettingsDialog(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
+                SectionTitle("Автозапуск")
                 if (launchableApps.isNotEmpty()) {
                     Text(
                         text = stringResource(R.string.label_auto_launch_app),
-                        style = MaterialTheme.typography.bodyLarge
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
                     )
                     Row(
                         modifier = Modifier
@@ -670,13 +842,14 @@ private fun SettingsDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                Text(
-                    text = "$latestFingerprintLabel: ${latestFingerprintState.savedRootSha ?: latestFingerprintNotLoaded}",
-                    style = MaterialTheme.typography.bodyMedium
+                SectionTitle("Fingerprint")
+                LabeledValue(
+                    label = latestFingerprintLabel,
+                    value = latestFingerprintState.savedRootSha ?: latestFingerprintNotLoaded
                 )
-                Text(
-                    text = "$latestGameServerLabel: ${latestFingerprintState.savedGameServer ?: latestGameServerNotLoaded}",
-                    style = MaterialTheme.typography.bodyMedium
+                LabeledValue(
+                    label = latestGameServerLabel,
+                    value = latestFingerprintState.savedGameServer ?: latestGameServerNotLoaded
                 )
                 when {
                     latestFingerprintState.isFetching -> {

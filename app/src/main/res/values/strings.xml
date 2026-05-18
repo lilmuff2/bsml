@@ -3,6 +3,7 @@
     <string name="status_vpn_permission_denied">VPN permission denied</string>
     <string name="log_vpn_permission_denied">VPN permission denied by user</string>
     <string name="label_auto_disable_vpn">Авто выключение VPN</string>
+    <string name="hint_auto_disable_vpn">После завершения установки приложение дождется входа в меню и только потом отключит перехват. Дисконнект все равно будет, но уже после загрузки игры.</string>
     <string name="label_install_result_notifications">Уведомления о результате установки</string>
     <string name="label_auto_launch_app">Приложение для автозапуска</string>
     <string name="option_no_auto_launch">Без автозапуска</string>

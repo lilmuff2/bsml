@@ -23,9 +23,14 @@ interface TcpProxySessionCallbacks {
     fun shouldRewriteContentHash(): Boolean
     fun shouldZeroClientHelloGameVersion(): Boolean
     fun onClientHelloContentHashObserved(contentHash: String)
+    fun onClientHelloVersionObserved(version: String)
     fun onClientHelloGameVersionZeroApplied()
     fun onFinalOriginalClientHello(contentHash: String)
-    fun rewriteLoginFailedBody(body: ByteArray): LoginFailedRewriteResult
+    fun rewriteLoginFailedBody(body: ByteArray, version: Int): LoginFailedRewriteResult
+    fun maybeBuildLocalLoginFailedResponse(
+        contentHash: String,
+        clientHelloLog: String
+    ): ByteArray?
 }
 
 private const val SOCKET_CONNECT_TIMEOUT_MS = 10_000
@@ -173,6 +178,11 @@ class TcpProxySession(
             payload = payload,
             shouldRewriteContentHash = callbacks.shouldRewriteContentHash()
         )
+        if (outgoingPayload == null) {
+            debugLog("Client payload consumed locally size=${payload.size}")
+            sendAck()
+            return
+        }
         debugLog(
             "Queue remote write size=${outgoingPayload.size} " +
                 "firstBytes=${outgoingPayload.take(min(16, outgoingPayload.size)).toByteArray().toHexString()}"
@@ -186,7 +196,7 @@ class TcpProxySession(
     private fun rewriteClientPayload(
         payload: ByteArray,
         shouldRewriteContentHash: Boolean
-    ): ByteArray {
+    ): ByteArray? {
         var offset = 0
         var changed = false
         val writer = ByteWriter()
@@ -202,12 +212,32 @@ class TcpProxySession(
             val body = payload.copyOfRange(bodyStart, bodyStart + payloadLength)
             val outgoingBody = if (messageId == CLIENT_HELLO_ID) {
                 val rewriteStartedAt = System.nanoTime()
+                readClientHelloVersion(body)?.let { callbacks.onClientHelloVersionObserved(it.displayName) }
                 val oldContentHash = readClientHelloContentHash(body) ?: "<null>"
                 callbacks.onClientHelloContentHashObserved(oldContentHash)
                 val shouldRewriteThisClientHello =
                     shouldRewriteContentHash && !oldContentHash.startsWith(PATCH_NAMESPACE)
                 val shouldZeroGameVersion = callbacks.shouldZeroClientHelloGameVersion()
-                if (shouldRewriteThisClientHello || shouldZeroGameVersion) {
+                val clientHelloLog = buildString {
+                    append("SC CLIENT_HELLO contentHash=")
+                    if (shouldRewriteThisClientHello) {
+                        append("$oldContentHash->$PATCH_NAMESPACE")
+                    } else {
+                        append(oldContentHash)
+                    }
+                    append(" local LOGIN_FAILED rewriteMs=${elapsedMs(rewriteStartedAt)}")
+                    append(" len=$payloadLength ver=$version")
+                }
+                val localLoginFailed = if (!shouldZeroGameVersion) {
+                    callbacks.maybeBuildLocalLoginFailedResponse(oldContentHash, clientHelloLog)
+                } else {
+                    null
+                }
+                if (localLoginFailed != null) {
+                    changed = true
+                    sendPayloadFromServer(localLoginFailed)
+                    null
+                } else if (shouldRewriteThisClientHello || shouldZeroGameVersion) {
                     rewriteClientHello(
                         body = body,
                         forcedContentHash = if (shouldRewriteThisClientHello) PATCH_NAMESPACE else null,
@@ -244,7 +274,9 @@ class TcpProxySession(
                 body
             }
 
-            writer.writeBytes(buildSupercellMessage(messageId, outgoingBody, version))
+            if (outgoingBody != null) {
+                writer.writeBytes(buildSupercellMessage(messageId, outgoingBody, version))
+            }
             offset += fullLength
         }
 
@@ -252,7 +284,7 @@ class TcpProxySession(
             writer.writeBytes(payload.copyOfRange(offset, payload.size))
         }
 
-        return if (changed) writer.toByteArray() else payload
+        return if (changed) writer.toByteArray().takeIf { it.isNotEmpty() } else payload
     }
 
     private fun flushPendingClientPayloads() {
@@ -448,7 +480,7 @@ class TcpProxySession(
             val body = serverMessageBuffer.read(payloadLength)
             val transformedBody = if (messageId == LOGIN_FAILED_ID) {
                 val rewriteStartedAt = System.nanoTime()
-                val rewriteResult = callbacks.rewriteLoginFailedBody(body)
+                val rewriteResult = callbacks.rewriteLoginFailedBody(body, version)
                 rewriteResult.body.also { transformed ->
                     VpnLogRepository.log(
                         formatLoginFailedLog(

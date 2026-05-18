@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.BSML" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.BSML" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bsml_start_background</item>
+        <item name="android:colorAccent">@color/purple_200</item>
+        <item name="android:navigationBarColor">@color/bsml_start_background</item>
+        <item name="android:statusBarColor">@color/bsml_start_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
 </resources>

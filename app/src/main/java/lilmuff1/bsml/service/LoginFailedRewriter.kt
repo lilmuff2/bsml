@@ -23,6 +23,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val RANDOM_SHA_SUFFIX_LENGTH = 8
+private const val FINGERPRINT_COMPRESSION_LEVEL = Deflater.BEST_SPEED
+private const val FINGERPRINT_COMPRESSION_BUFFER_SIZE = 256 * 1024
 
 class LoginFailedRewriter(
     private val filesDir: File,
@@ -31,10 +33,32 @@ class LoginFailedRewriter(
     private val openPatchedAsset: (String) -> ByteArray?,
     private val getCurrentModStateKey: () -> String
 ) {
+    companion object {
+        private val prewarmedFingerprintBaseCache = ConcurrentHashMap<String, FingerprintRewriteResult>()
+
+        private fun prewarmedBaseKey(clientHelloHash: String, modStateKey: String): String {
+            return "${clientHelloHash.trim()}|$modStateKey"
+        }
+    }
+
     @Volatile
     private var lastStoredServerClientHelloHash: String? = null
     private val decompressedFingerprintCache = ConcurrentHashMap<String, FingerprintRewriteResult>()
     private val inflatedFingerprintCache = ConcurrentHashMap<String, InflatedFingerprintCacheEntry>()
+
+    fun prewarmFingerprintJson(fingerprintJson: String, clientHelloHash: String?) {
+        val normalizedHash = clientHelloHash?.trim()?.ifEmpty { null } ?: return
+        val modStateKey = getCurrentModStateKey()
+        runCatching {
+            val base = rewriteFingerprintJsonStructured(
+                fingerprintJson = fingerprintJson,
+                shouldPatchRootFingerprintSha = false,
+                includeTriggerAsset = false
+            )
+            prewarmedFingerprintBaseCache[prewarmedBaseKey(normalizedHash, modStateKey)] = base
+        }
+    }
+
     fun rewriteCleanup(
         body: ByteArray,
         reasonCode: Int,
@@ -148,12 +172,6 @@ class LoginFailedRewriter(
         } else {
             originalHashes
         }
-        VpnLogRepository.log(
-            "SC LOGIN_FAILED debug mode=delete reason=$reasonCode prefixMs=$prefixMs tailParseMs=$tailParseMs " +
-                "prefixEncodeMs=$prefixRoundTripMs tailRoundTripMs=$tailRoundTripMs deflateMs=$cleanupDeflateMs " +
-                "tailEncodeMs=$tailEncodeMs fingerprintMs=$fingerprintMs encodeMs=$encodeMs reparseMs=$cleanupReparseMs " +
-                "reparseTailMs=$cleanupReparseTailMs validateMs=$validateMs totalMs=${elapsedMsLong(totalStartedAt)}"
-        )
         return LoginFailedRewriteResult(
             body = rewrittenBody,
             hashes = hashes,
@@ -194,7 +212,6 @@ class LoginFailedRewriter(
 
         var assetUrlRewritten = false
         var finalRootSha: String? = null
-        var expectedTailUrlCount: Int? = null
         var patchStats = FingerprintPatchStats()
         var originalRootSha: String? = null
         val shouldPatchFingerprint = true
@@ -234,7 +251,8 @@ class LoginFailedRewriter(
                 rewriteCompressedFingerprintJson(
                     compressedFingerprint = bytes,
                     shouldPatchRootFingerprintSha = shouldPatchRootFingerprintSha,
-                    includeTriggerAsset = includeTriggerAsset
+                    includeTriggerAsset = includeTriggerAsset,
+                    currentClientHelloHash = currentClientHelloHash
                 ).also { result ->
                     originalRootSha = result.patchStats.rootShaOld ?: result.rootSha ?: originalRootSha
                     finalRootSha = result.rootSha ?: finalRootSha
@@ -250,7 +268,6 @@ class LoginFailedRewriter(
                     assetUrlRewritten = true
                 }
             }
-            expectedTailUrlCount = 1
             val tailEncodeStartedAt = System.nanoTime()
             tail.copy(
                 compressedFingerprint = rewrittenCompressedFingerprint,
@@ -279,42 +296,11 @@ class LoginFailedRewriter(
         )
         val rewrittenBody = rewritten.encode()
         val encodeMs = elapsedMsLong(encodeStartedAt)
-        val validateStartedAt = System.nanoTime()
-        val reparseStartedAt = System.nanoTime()
-        val reparsed = LoginFailedPrefix.parse(rewrittenBody)
-        val reparseMs = elapsedMsLong(reparseStartedAt)
-        if (reparsed == null) {
-            VpnLogRepository.log("SC LOGIN_FAILED structure mismatch stage=patched-parse encoded=${rewrittenBody.size}")
-            return LoginFailedRewriteResult(body, FingerprintHashes(finalRootSha, null), patchStats)
+        val resultingHashes = if (shouldPatchFingerprint) {
+            FingerprintHashes(finalRootSha, null)
+        } else {
+            extractFingerprintHashes(rewrittenFingerprint, null)
         }
-        val patchedRoundTripStartedAt = System.nanoTime()
-        val patchedRoundTrip = reparsed.encode()
-        val patchedRoundTripMs = elapsedMsLong(patchedRoundTripStartedAt)
-        if (!patchedRoundTrip.contentEquals(rewrittenBody)) {
-            VpnLogRepository.log(
-                "SC LOGIN_FAILED structure mismatch stage=patched-roundtrip encoded=${rewrittenBody.size} " +
-                    "roundtrip=${patchedRoundTrip.size} diff=${firstDiffIndex(rewrittenBody, patchedRoundTrip)}"
-            )
-            return LoginFailedRewriteResult(body, FingerprintHashes(finalRootSha, null), patchStats)
-        }
-        val validateTailStartedAt = System.nanoTime()
-        val validatedHashes = validatePatchedLoginFailedBody(
-            reparsed,
-            expectedTailUrlCount,
-            shouldPatchFingerprint,
-            finalRootSha
-        )
-        val validateTailMs = elapsedMsLong(validateTailStartedAt)
-        if (validatedHashes == null) {
-            return LoginFailedRewriteResult(body, FingerprintHashes(finalRootSha, null), patchStats)
-        }
-        val validateMs = elapsedMsLong(validateStartedAt)
-        VpnLogRepository.log(
-            "SC LOGIN_FAILED debug mode=install prefixMs=$prefixMs plainFingerprintMs=$plainFingerprintMs tailMs=$tailMs " +
-                "prefixEncodeMs=$prefixRoundTripMs tailRoundTripMs=$tailRoundTripMs compressedMs=$compressedMs " +
-                "tailEncodeMs=$tailEncodeMs encodeMs=$encodeMs reparseMs=$reparseMs patchedRoundTripMs=$patchedRoundTripMs " +
-                "validateTailMs=$validateTailMs validateMs=$validateMs totalMs=${elapsedMsLong(totalStartedAt)}"
-        )
         maybeStoreLatestServerFingerprint(
             plainFingerprint = parsed.fingerprint,
             compressedFingerprint = LoginFailedTail.parse(parsed.suffix)?.compressedFingerprint,
@@ -323,7 +309,7 @@ class LoginFailedRewriter(
         )
         return LoginFailedRewriteResult(
             body = rewrittenBody,
-            hashes = validatedHashes,
+            hashes = resultingHashes,
             patchStats = patchStats,
             assetUrlRewritten = assetUrlRewritten,
             rootShaRewriteApplied = shouldPatchRootFingerprintSha,
@@ -332,46 +318,36 @@ class LoginFailedRewriter(
         )
     }
 
-    private fun validatePatchedLoginFailedBody(
-    parsed: LoginFailedPrefix,
-    expectedTailUrlCount: Int?,
-    didPatchFingerprint: Boolean,
-    knownRootSha: String?
-    ): FingerprintHashes? {
-    val tail = LoginFailedTail.parse(parsed.suffix)
-    if (tail == null) {
-        VpnLogRepository.log("SC LOGIN_FAILED structure mismatch stage=patched-tail-parse suffix=${parsed.suffix.size}")
-        return null
-    }
-    if (didPatchFingerprint && parsed.fingerprint != null) {
-        VpnLogRepository.log("SC LOGIN_FAILED structure mismatch stage=patched-fingerprint expectedNull=false")
-        return null
-    }
-    if (didPatchFingerprint && tail.compressedFingerprint == null) {
-        VpnLogRepository.log("SC LOGIN_FAILED structure mismatch stage=patched-tail compressedFingerprint=null")
-        return null
-    }
-    if (expectedTailUrlCount != null && tail.contentDownloadUrls.size != expectedTailUrlCount) {
-        VpnLogRepository.log(
-            "SC LOGIN_FAILED structure mismatch stage=patched-tail urls=$expectedTailUrlCount->${tail.contentDownloadUrls.size}"
-        )
-        return null
-    }
-    return if (didPatchFingerprint) {
-        FingerprintHashes(knownRootSha, null)
-    } else {
-        FingerprintHashes(extractPlainFingerprintRootSha(parsed.fingerprint), null)
-    }
-}
-
     private fun extractPlainFingerprintRootSha(plainFingerprint: String?): String? {
     if (plainFingerprint.isNullOrBlank()) return null
+    findLikelyRootSha(plainFingerprint)?.let { return it }
     return try {
         val root = JSONObject(plainFingerprint)
         root.optString("sha", "").ifEmpty { null }
     } catch (_: Throwable) {
         null
     }
+}
+
+    private fun findLikelyRootSha(json: String): String? {
+    val shaKey = "\"sha\""
+    val keyIndex = json.lastIndexOf(shaKey).takeIf { it >= 0 } ?: return null
+    val colonIndex = json.indexOf(':', keyIndex + shaKey.length).takeIf { it >= 0 } ?: return null
+    val valueStartQuote = json.indexOf('"', colonIndex + 1).takeIf { it >= 0 } ?: return null
+    val valueStart = valueStartQuote + 1
+    val valueEndQuote = json.indexOf('"', valueStart).takeIf { it >= 0 } ?: return null
+    return json.substring(valueStart, valueEndQuote).ifEmpty { null }
+}
+
+    private fun replaceLikelyRootSha(json: String, oldSha: String, newSha: String): String? {
+    val shaKey = "\"sha\""
+    val keyIndex = json.lastIndexOf(shaKey).takeIf { it >= 0 } ?: return null
+    val colonIndex = json.indexOf(':', keyIndex + shaKey.length).takeIf { it >= 0 } ?: return null
+    val valueStartQuote = json.indexOf('"', colonIndex + 1).takeIf { it >= 0 } ?: return null
+    val valueStart = valueStartQuote + 1
+    val valueEndQuote = json.indexOf('"', valueStart).takeIf { it >= 0 } ?: return null
+    if (json.substring(valueStart, valueEndQuote) != oldSha) return null
+    return json.replaceRange(valueStart, valueEndQuote, newSha)
 }
 
     private fun extractFingerprintHashes(
@@ -620,19 +596,29 @@ class LoginFailedRewriter(
     private fun rewriteCompressedFingerprintJson(
     compressedFingerprint: ByteArray,
     shouldPatchRootFingerprintSha: Boolean,
-    includeTriggerAsset: Boolean
+    includeTriggerAsset: Boolean,
+    currentClientHelloHash: String?
     ): CompressedFingerprintRewriteResult {
     val cacheKey = buildDecompressedFingerprintCacheKey(compressedFingerprint)
-    val inflated = inflatedFingerprintCache[cacheKey] ?: inflateFingerprint(compressedFingerprint)
-        ?.let { InflatedFingerprintCacheEntry(format = it.first, json = it.second) }
-        ?.also { inflatedFingerprintCache[cacheKey] = it }
-        ?: return CompressedFingerprintRewriteResult(null, null, FingerprintPatchStats())
-    val base = decompressedFingerprintCache[cacheKey] ?: rewriteFingerprintJsonStructured(
+    val prewarmedBase = findPrewarmedFingerprintBase(currentClientHelloHash)
+    val inflated = if (prewarmedBase != null) {
+        InflatedFingerprintCacheEntry(format = guessFingerprintFormat(compressedFingerprint), json = prewarmedBase.json)
+    } else {
+        inflatedFingerprintCache[cacheKey] ?: inflateFingerprint(compressedFingerprint)
+            ?.let { InflatedFingerprintCacheEntry(format = it.first, json = it.second) }
+            ?.also { inflatedFingerprintCache[cacheKey] = it }
+            ?: return CompressedFingerprintRewriteResult(null, null, FingerprintPatchStats())
+    }
+    val base = prewarmedBase ?: decompressedFingerprintCache[cacheKey] ?: rewriteFingerprintJsonStructured(
         fingerprintJson = inflated.json,
         shouldPatchRootFingerprintSha = false,
         includeTriggerAsset = false
     ).also {
         decompressedFingerprintCache[cacheKey] = it
+    }
+    if (prewarmedBase != null) {
+        decompressedFingerprintCache.putIfAbsent(cacheKey, prewarmedBase)
+        inflatedFingerprintCache.putIfAbsent(cacheKey, inflated)
     }
     val rewritten = applyRuntimeFingerprintMutations(
         fingerprintJson = base.json,
@@ -642,6 +628,12 @@ class LoginFailedRewriter(
     )
     val bytes = deflateFingerprint(rewritten.json, inflated.format)
     return CompressedFingerprintRewriteResult(bytes, rewritten.rootSha, rewritten.patchStats, rewritten.json)
+}
+
+    private fun findPrewarmedFingerprintBase(currentClientHelloHash: String?): FingerprintRewriteResult? {
+    val contentHash = currentClientHelloHash?.trim()?.ifEmpty { null } ?: return null
+    if (contentHash.startsWith(PATCH_NAMESPACE)) return null
+    return prewarmedFingerprintBaseCache[prewarmedBaseKey(contentHash, getCurrentModStateKey())]
 }
 
     private fun maybeStoreLatestServerFingerprint(
@@ -756,42 +748,37 @@ class LoginFailedRewriter(
         includeTriggerAsset: Boolean
     ): FingerprintRewriteResult {
     return try {
-        val root = JSONObject(fingerprintJson)
-        val oldRootSha = root.optString("sha", "").ifEmpty { null }
-        val files = root.optJSONArray("files") ?: JSONArray().also { root.put("files", it) }
-        val fileObjects = HashMap<String, JSONObject>(files.length() * 2)
-        for (index in 0 until files.length()) {
-            val file = files.optJSONObject(index) ?: continue
-            val path = file.optString("file", "")
-            if (path.isNotEmpty()) {
-                fileObjects[path] = file
-            }
-        }
-
+        val oldRootSha = extractPlainFingerprintRootSha(fingerprintJson)
+        var rewrittenJson = fingerprintJson
         var patchStats = basePatchStats
+
         if (includeTriggerAsset) {
             val trigger = createGeneratedTriggerAsset()
-            val triggerObject = fileObjects[PATCH_NAMESPACE]
-            if (triggerObject != null) {
-                triggerObject.put("sha", trigger.sha)
-            } else {
-                val created = JSONObject()
-                    .put("file", PATCH_NAMESPACE)
-                    .put("sha", trigger.sha)
-                files.put(created)
+            rewrittenJson = upsertFileShaPreservingJson(
+                json = rewrittenJson,
+                path = PATCH_NAMESPACE,
+                sha = trigger.sha
+            ) ?: rewrittenJson.also {
+                VpnLogRepository.log("SC fingerprint file=$PATCH_NAMESPACE upsert failed")
             }
-            patchStats = basePatchStats.copy(fileShaPatched = basePatchStats.fileShaPatched + 1)
+            patchStats = patchStats.copy(fileShaPatched = basePatchStats.fileShaPatched + 1)
         }
+
         var finalRootSha = oldRootSha
-        if (shouldPatchRootFingerprintSha && PATCH_NAMESPACE.isNotEmpty()) {
-            finalRootSha = PATCH_NAMESPACE + randomShaSuffix()
-            root.put("sha", finalRootSha)
-            patchStats = patchStats.copy(rootShaOld = oldRootSha, rootShaNew = finalRootSha)
+        if (shouldPatchRootFingerprintSha && !oldRootSha.isNullOrEmpty()) {
+            val patchedRootSha = PATCH_NAMESPACE + randomShaSuffix()
+            rewrittenJson = replaceLikelyRootSha(rewrittenJson, oldRootSha, patchedRootSha)
+                ?: replaceRootShaPreservingJson(rewrittenJson, oldRootSha, patchedRootSha)
+                ?: rewrittenJson.also {
+                    VpnLogRepository.log("SC fingerprint rootSha in-place patch failed old=$oldRootSha")
+                }
+            finalRootSha = patchedRootSha
+            patchStats = patchStats.copy(rootShaOld = oldRootSha, rootShaNew = patchedRootSha)
         }
 
         FingerprintRewriteResult(
-            json = root.toString(),
-            rootSha = finalRootSha ?: oldRootSha,
+            json = rewrittenJson,
+            rootSha = finalRootSha,
             patchStats = patchStats
         )
     } catch (error: Throwable) {
@@ -882,21 +869,30 @@ class LoginFailedRewriter(
 }
 
     private fun deflateZlib(text: String, nowrap: Boolean): ByteArray {
+    return deflateZlibBytes(text.encodeToByteArray(), nowrap)
+}
+
+    private fun deflateZlibBytes(bytes: ByteArray, nowrap: Boolean): ByteArray {
     val output = ByteArrayOutputStream()
-    DeflaterOutputStream(output, Deflater(Deflater.DEFAULT_COMPRESSION, nowrap)).use { deflater ->
-        deflater.write(text.encodeToByteArray())
+    val deflater = Deflater(FINGERPRINT_COMPRESSION_LEVEL, nowrap)
+    try {
+        DeflaterOutputStream(output, deflater, FINGERPRINT_COMPRESSION_BUFFER_SIZE).use { stream ->
+            stream.write(bytes)
+        }
+    } finally {
+        deflater.end()
     }
     return output.toByteArray()
 }
 
     private fun deflatePrefixedZlib(text: String): ByteArray {
     val textBytes = text.encodeToByteArray()
-    return writeLittleEndianInt(textBytes.size) + deflateZlib(text, nowrap = false)
+    return writeLittleEndianInt(textBytes.size) + deflateZlibBytes(textBytes, nowrap = false)
 }
 
     private fun deflateGzip(text: String): ByteArray {
     val output = ByteArrayOutputStream()
-    GZIPOutputStream(output).use { gzip ->
+    GZIPOutputStream(output, FINGERPRINT_COMPRESSION_BUFFER_SIZE).use { gzip ->
         gzip.write(text.encodeToByteArray())
     }
     return output.toByteArray()

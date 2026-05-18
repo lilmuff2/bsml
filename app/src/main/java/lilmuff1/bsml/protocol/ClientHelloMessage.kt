@@ -1,5 +1,14 @@
 package lilmuff1.bsml.protocol
 
+data class ClientHelloVersion(
+    val major: Int,
+    val revision: Int,
+    val build: Int
+) {
+    val displayName: String
+        get() = "$major.$revision.$build"
+}
+
 fun rewriteClientHelloContentHash(body: ByteArray, forcedContentHash: String): ByteArray? {
     val contentHashLengthOffset = 20
     if (body.size < contentHashLengthOffset + 4) return null
@@ -35,6 +44,17 @@ fun readClientHelloContentHash(body: ByteArray): String? {
     if (length == -1) return null
     if (length < 0 || body.size < contentHashLengthOffset + 4 + length) return null
     return body.copyOfRange(contentHashLengthOffset + 4, contentHashLengthOffset + 4 + length).decodeToString()
+}
+
+fun readClientHelloVersion(body: ByteArray): ClientHelloVersion? {
+    val major = readInt32(body, 8) ?: return null
+    val revision = readInt32(body, 12) ?: return null
+    val build = readInt32(body, 16) ?: return null
+    return ClientHelloVersion(
+        major = major,
+        revision = revision,
+        build = build
+    )
 }
 
 fun rewriteClientHello(

@@ -21,6 +21,7 @@ import lilmuff1.bsml.protocol.LoginFailedTail
 import lilmuff1.bsml.protocol.buildSupercellMessage
 import lilmuff1.bsml.protocol.readUInt16
 import lilmuff1.bsml.protocol.readUInt24
+import lilmuff1.bsml.service.LoginFailedRewritePrewarmer
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -123,6 +124,7 @@ object LatestFingerprintRepository {
                     setProgress(context, 5, context.getString(lilmuff1.bsml.R.string.fetch_latest_stage_save))
                     saveLatest(filesDir, fingerprintJson, origins, rootSha)
                     storeObservedGameServer(filesDir, target)
+                    LoginFailedRewritePrewarmer.prewarm(context)
                     VpnLogRepository.log("SC latest fingerprint fetched rootSha=$rootSha origins=${origins.size} host=$target")
                     refreshState(context)
                     _state.value = _state.value.copy(

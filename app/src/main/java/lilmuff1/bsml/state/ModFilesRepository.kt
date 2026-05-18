@@ -7,10 +7,15 @@ import androidx.documentfile.provider.DocumentFile
 import java.io.BufferedInputStream
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import lilmuff1.bsml.service.LoginFailedRewritePrewarmer
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -45,6 +50,7 @@ object ModFilesRepository {
     private const val PREFS_NAME = "mod_files_repository"
     private const val KEY_TREE_URI = "tree_uri"
     private const val PREPARED_INDEX_FILE = "prepared_mod_index.json"
+    private val prepareDispatcher = Dispatchers.IO.limitedParallelism(PREPARE_FILE_PARALLELISM)
 
     private val _preparation = MutableStateFlow(ModPreparationState())
     val preparation = _preparation.asStateFlow()
@@ -121,7 +127,7 @@ object ModFilesRepository {
             error = null
         )
 
-        val sourceFiles = listFiles(context)
+        val sourceFiles = listFilesParallel(context)
         val existingPreparedList = listPreparedFiles(context)
         if (matchesSnapshot(existingPreparedList, sourceFiles)) {
             _preparation.value = ModPreparationState(
@@ -145,48 +151,57 @@ object ModFilesRepository {
             error = null
         )
 
-        val preparedFiles = ArrayList<PreparedModFile>(sourceFiles.size)
-        sourceFiles.forEachIndexed { index, file ->
-            val cached = existingPrepared[file.path]
-            val sha = if (cached != null && cached.matches(file)) {
-                cached.sha
-            } else {
-                runCatching {
-                    context.contentResolver.openInputStream(file.uri)?.use { input ->
-                        sha1Hex(input)
+        val completedCount = AtomicInteger(0)
+        val preparedFiles = coroutineScope {
+            sourceFiles.map { file ->
+                async(prepareDispatcher) {
+                    val cached = existingPrepared[file.path]
+                    val sha = if (cached != null && cached.matches(file)) {
+                        cached.sha
+                    } else {
+                        runCatching {
+                            context.contentResolver.openInputStream(file.uri)?.use { input ->
+                                sha1Hex(input)
+                            }
+                        }.getOrNull()
                     }
-                }.getOrNull()
-            }
-            if (sha == null) {
-                _preparation.value = ModPreparationState(
-                    folderName = folderName,
-                    isPreparing = false,
-                    preparedCount = index,
-                    totalCount = sourceFiles.size,
-                    isReady = false,
-                    error = file.path
-                )
-                return@withContext false
-            }
-
-            preparedFiles += PreparedModFile(
-                path = file.path,
-                sha = sha,
-                uri = file.uri.toString(),
-                size = file.size,
-                lastModified = file.lastModified
-            )
+                    val completed = completedCount.incrementAndGet()
+                    _preparation.value = ModPreparationState(
+                        folderName = folderName,
+                        isPreparing = true,
+                        preparedCount = completed,
+                        totalCount = sourceFiles.size,
+                        isReady = false,
+                        error = null
+                    )
+                    if (sha == null) {
+                        null
+                    } else {
+                        PreparedModFile(
+                            path = file.path,
+                            sha = sha,
+                            uri = file.uri.toString(),
+                            size = file.size,
+                            lastModified = file.lastModified
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+        val failedIndex = preparedFiles.indexOfFirst { it == null }
+        if (failedIndex >= 0) {
             _preparation.value = ModPreparationState(
                 folderName = folderName,
-                isPreparing = true,
-                preparedCount = index + 1,
+                isPreparing = false,
+                preparedCount = failedIndex,
                 totalCount = sourceFiles.size,
                 isReady = false,
-                error = null
+                error = sourceFiles[failedIndex].path
             )
+            return@withContext false
         }
 
-        writePreparedIndex(context, preparedFiles)
+        writePreparedIndex(context, preparedFiles.filterNotNull())
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = false,
@@ -195,6 +210,7 @@ object ModFilesRepository {
             isReady = true,
             error = null
         )
+        LoginFailedRewritePrewarmer.prewarm(context)
         true
     }
 
@@ -290,6 +306,39 @@ object ModFilesRepository {
         return DocumentFile.fromTreeUri(context, uri)?.takeIf { it.exists() && it.isDirectory }
     }
 
+    private suspend fun listFilesParallel(context: Context): List<ModFileEntry> {
+        val root = getRoot(context) ?: return emptyList()
+        return collectFilesParallel(root, "").sortedBy { it.path }
+    }
+
+    private suspend fun collectFilesParallel(
+        directory: DocumentFile,
+        prefix: String
+    ): List<ModFileEntry> = coroutineScope {
+        val files = withContext(prepareDispatcher) { directory.listFiles().toList() }
+        val directFiles = ArrayList<ModFileEntry>()
+        val childJobs = files.mapNotNull { file ->
+            val name = file.name ?: return@mapNotNull null
+            val path = if (prefix.isEmpty()) name else "$prefix/$name"
+            when {
+                file.isDirectory -> async(prepareDispatcher) {
+                    collectFilesParallel(file, path)
+                }
+                file.isFile -> {
+                    directFiles += ModFileEntry(
+                        path = normalizePath(path),
+                        uri = file.uri,
+                        size = file.length(),
+                        lastModified = file.lastModified()
+                    )
+                    null
+                }
+                else -> null
+            }
+        }
+        directFiles + childJobs.awaitAll().flatten()
+    }
+
     private fun collectFiles(directory: DocumentFile, prefix: String, result: MutableList<ModFileEntry>) {
         directory.listFiles().forEach { file ->
             val name = file.name ?: return@forEach
@@ -370,3 +419,4 @@ private object IntentFlags {
 }
 
 private const val COPY_BUFFER_SIZE = 256 * 1024
+private const val PREPARE_FILE_PARALLELISM = 4
