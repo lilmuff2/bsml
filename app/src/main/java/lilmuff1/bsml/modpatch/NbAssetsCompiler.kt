@@ -6,6 +6,7 @@ import java.io.File
 import java.security.MessageDigest
 import android.util.Log
 import java.util.zip.ZipFile
+import lilmuff1.bsml.state.OriginalAssetsRepository
 import lilmuff1.bsml.state.PreparedModFile
 import lilmuff1.bsml.state.VpnLogRepository
 import org.json.JSONArray
@@ -28,14 +29,14 @@ class NbAssetsCompiler(
         }
     }
 
-    fun compile(archive: File, outputDir: File): List<PreparedModFile> {
+    fun compile(archive: File, outputDir: File, clearOutput: Boolean = true): List<PreparedModFile> {
         val startedAt = System.nanoTime()
         VpnLogRepository.log("NBASSETS prepare start file=${archive.name}")
-        if (outputDir.exists()) outputDir.deleteRecursively()
+        if (clearOutput && outputDir.exists()) outputDir.deleteRecursively()
         outputDir.mkdirs()
 
         val contentJson = NbAssetsArchiveReader.readRootContentJson(archive)
-        val provider = OriginalAssetProvider(context)
+        val provider = OriginalAssetProvider(context, outputDir)
         val contentParts = buildContentParts(contentJson)
         VpnLogRepository.log(
             "NBASSETS compile enabledFeatures=${enabledFeatureIds.sorted()} activeParts=${contentParts.map { it.key ?: "<root>" }}"
@@ -49,6 +50,19 @@ class NbAssetsCompiler(
         val prepared = LinkedHashMap<String, File>()
         var assetCount = 0
         var csvCount = 0
+
+        if (clearOutput) {
+            OriginalAssetsRepository.listFiles(context)
+                .filterNot { it.path.endsWith(".csv", ignoreCase = true) }
+                .forEach { sourceFile ->
+                    val output = File(outputDir, sourceFile.path.toFingerprintPath())
+                    output.parentFile?.mkdirs()
+                    context.contentResolver.openInputStream(sourceFile.uri)?.use { input ->
+                        output.outputStream().use { input.copyTo(it) }
+                    }
+                    prepared[sourceFile.path.toFingerprintPath()] = output
+                }
+        }
 
         ZipFile(archive).use { zip ->
             contentParts.forEach { part ->
@@ -78,8 +92,14 @@ class NbAssetsCompiler(
                 assetCount++
             }
         }
-        lastMergedPatchJson = patchJson.toString()
-        lastMergedPatchJsonFile(context).writeText(lastMergedPatchJson.orEmpty())
+        val currentPatchJson = patchJson.toString()
+        val mergedPatchJson = if (clearOutput) {
+            currentPatchJson
+        } else {
+            mergePatchJsonStrings(lastMergedPatchJsonFile(context).takeIf { it.isFile }?.readText(), currentPatchJson)
+        }
+        lastMergedPatchJson = mergedPatchJson
+        lastMergedPatchJsonFile(context).writeText(mergedPatchJson)
         VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size}")
 
         patchJson.keysList()
@@ -262,6 +282,12 @@ class NbAssetsCompiler(
                     base.put(key, incoming)
                 }
             }
+    }
+
+    private fun mergePatchJsonStrings(baseJson: String?, updateJson: String): String {
+        val base = baseJson?.takeIf { it.isNotBlank() }?.let(::JSONObject) ?: JSONObject()
+        mergeTables(base, JSONObject(updateJson))
+        return base.toString()
     }
 }
 

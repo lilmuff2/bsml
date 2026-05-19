@@ -3,6 +3,7 @@ package lilmuff1.bsml.state
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.util.UUID
 import java.util.zip.ZipFile
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,6 +48,8 @@ data class ImportedModFeatureConflict(
 )
 
 data class ImportedModState(
+    val mods: List<ImportedModListItem> = emptyList(),
+    val selectedModId: String? = null,
     val fileName: String? = null,
     val metadata: ImportedModMetadata? = null,
     val isEnabled: Boolean = true,
@@ -57,61 +60,115 @@ data class ImportedModState(
     val error: String? = null
 )
 
+data class ImportedModListItem(
+    val id: String,
+    val fileName: String,
+    val metadata: ImportedModMetadata? = null,
+    val isEnabled: Boolean = true,
+    val iconLastModified: Long = 0L,
+    val features: List<ImportedModFeature> = emptyList(),
+    val featureGroups: List<ImportedModFeatureGroup> = emptyList(),
+    val featureSelection: ImportedModFeatureSelection = ImportedModFeatureSelection()
+)
+
 object ImportedModRepository {
     private const val IMPORTED_DIR = "imported_mods"
-    private const val ACTIVE_MOD_FILE = "active_mod.nbassets"
-    private const val ACTIVE_METADATA_FILE = "active_mod_metadata.json"
-    private const val ACTIVE_ICON_FILE = "active_mod_icon.png"
-    private const val ACTIVE_FEATURE_SELECTION_FILE = "active_mod_feature_selection.json"
-    private const val ACTIVE_MOD_STATE_FILE = "active_mod_state.json"
+    private const val MOD_ARCHIVE_FILE = "mod.nbassets"
+    private const val MOD_METADATA_FILE = "metadata.json"
+    private const val MOD_ICON_FILE = "icon.png"
+    private const val MOD_FEATURE_SELECTION_FILE = "feature_selection.json"
+    private const val MOD_STATE_FILE = "mod_state.json"
+    private const val SELECTED_MOD_FILE = "selected_mod.json"
 
     private val _state = MutableStateFlow(ImportedModState())
     val state = _state.asStateFlow()
 
     fun refreshState(context: Context) {
-        val archive = activeArchiveFile(context)
-        val icon = activeIconFile(context)
-        if (archive.isFile && !isValidArchive(archive)) {
-            clearStoredMod(context)
-            _state.value = ImportedModState(error = "Invalid mod archive")
-            return
+        val allMods = listModDirs(context).mapNotNull { dir ->
+            val archive = archiveFile(dir)
+            if (!archive.isFile) return@mapNotNull null
+            if (!isValidArchive(archive)) {
+                dir.deleteRecursively()
+                return@mapNotNull null
+            }
+            val icon = iconFile(dir)
+            if (!icon.isFile) {
+                extractIcon(archive, icon)
+            }
+            val metadata = readMetadata(dir)
+            val manifest = NbAssetsArchiveReader.readManifest(archive)
+            val selection = readFeatureSelection(dir, manifest.features, manifest.featureGroups)
+            ImportedModListItem(
+                id = dir.name,
+                fileName = archive.name,
+                metadata = metadata,
+                isEnabled = readModEnabled(dir),
+                iconLastModified = icon.takeIf { it.isFile }?.lastModified() ?: 0L,
+                features = manifest.features,
+                featureGroups = manifest.featureGroups,
+                featureSelection = selection
+            )
         }
-        if (archive.isFile && !icon.isFile) {
-            extractIcon(archive, icon)
+        val selectedId = readSelectedModId(context)?.takeIf { id -> allMods.any { it.id == id } }
+            ?: allMods.firstOrNull()?.id
+        val selected = allMods.firstOrNull { it.id == selectedId }
+        if (selectedId != null) {
+            writeSelectedModId(context, selectedId)
         }
-        val metadata = readMetadata(context)
-        val manifest = archive.takeIf { it.isFile }?.let { NbAssetsArchiveReader.readManifest(it) }
-        val selection = readFeatureSelection(context, manifest?.features.orEmpty(), manifest?.featureGroups.orEmpty())
         _state.value = ImportedModState(
-            fileName = archive.takeIf { it.isFile }?.name,
-            metadata = metadata,
-            isEnabled = readModEnabled(context),
-            features = manifest?.features.orEmpty(),
-            featureGroups = manifest?.featureGroups.orEmpty(),
-            featureSelection = selection,
-            iconLastModified = icon.takeIf { it.isFile }?.lastModified() ?: 0L,
+            mods = allMods,
+            selectedModId = selectedId,
+            fileName = selected?.fileName,
+            metadata = selected?.metadata,
+            isEnabled = selected?.isEnabled ?: true,
+            features = selected?.features.orEmpty(),
+            featureGroups = selected?.featureGroups.orEmpty(),
+            featureSelection = selected?.featureSelection ?: ImportedModFeatureSelection(),
+            iconLastModified = selected?.iconLastModified ?: 0L,
             error = null
         )
     }
 
-    fun hasActiveMod(context: Context): Boolean = activeArchiveFile(context).isFile
+    fun hasActiveMod(context: Context): Boolean = listModDirs(context).isNotEmpty()
 
-    fun activeArchiveFile(context: Context): File = File(importedDir(context), ACTIVE_MOD_FILE)
-
-    fun activeIconFile(context: Context): File = File(importedDir(context), ACTIVE_ICON_FILE)
-
-    fun clear(context: Context) {
-        clearStoredMod(context)
-        _state.value = ImportedModState()
-        ModFilesRepository.clearPreparedFiles(context)
+    fun activeArchiveFile(context: Context): File {
+        val selectedId = readSelectedModId(context) ?: return File(importedDir(context), MOD_ARCHIVE_FILE)
+        return archiveFile(File(importedDir(context), selectedId))
     }
 
-    private fun clearStoredMod(context: Context) {
-        activeArchiveFile(context).delete()
-        metadataFile(context).delete()
-        activeIconFile(context).delete()
-        featureSelectionFile(context).delete()
-        modStateFile(context).delete()
+    fun activeIconFile(context: Context): File {
+        val selectedId = readSelectedModId(context) ?: return File(importedDir(context), MOD_ICON_FILE)
+        return iconFile(File(importedDir(context), selectedId))
+    }
+
+    fun iconFile(context: Context, modId: String): File = iconFile(File(importedDir(context), modId))
+
+    fun enabledArchives(context: Context): List<File> {
+        refreshState(context)
+        return _state.value.mods.filter { it.isEnabled }.map { archiveFile(File(importedDir(context), it.id)) }
+    }
+
+    fun selectMod(context: Context, modId: String) {
+        writeSelectedModId(context, modId)
+        refreshState(context)
+    }
+
+    fun clear(context: Context) {
+        val selectedId = _state.value.selectedModId ?: readSelectedModId(context) ?: return
+        clearStoredModDir(File(importedDir(context), selectedId))
+        _state.value = ImportedModState()
+        ModFilesRepository.clearPreparedFiles(context)
+        refreshState(context)
+    }
+
+    fun clear(context: Context, modId: String) {
+        clearStoredModDir(File(importedDir(context), modId))
+        ModFilesRepository.clearPreparedFiles(context)
+        refreshState(context)
+    }
+
+    private fun clearStoredModDir(dir: File) {
+        dir.deleteRecursively()
     }
 
     fun importMod(context: Context, uri: Uri): Boolean {
@@ -119,7 +176,9 @@ object ImportedModRepository {
             val dir = importedDir(context)
             dir.mkdirs()
             val tempArchive = File(dir, "import_candidate.nbassets")
-            val archive = activeArchiveFile(context)
+            val modDir = File(dir, UUID.randomUUID().toString())
+            modDir.mkdirs()
+            val archive = archiveFile(modDir)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 tempArchive.outputStream().use { output ->
                     input.copyTo(output)
@@ -128,7 +187,6 @@ object ImportedModRepository {
 
             if (!isValidArchive(tempArchive)) {
                 tempArchive.delete()
-                clearStoredMod(context)
                 ModFilesRepository.clearPreparedFiles(context)
                 error("invalid_nbassets_archive")
             }
@@ -137,52 +195,55 @@ object ImportedModRepository {
             tempArchive.delete()
             val metadata = NbAssetsArchiveReader.readMetadata(archive)
             val manifest = NbAssetsArchiveReader.readManifest(archive)
-            writeMetadata(context, metadata)
-            writeModEnabled(context, true)
+            writeMetadata(modDir, metadata)
+            writeModEnabled(modDir, true)
             val selection = defaultSelection(manifest.features, manifest.featureGroups)
-            writeFeatureSelection(context, selection)
-            val icon = activeIconFile(context)
+            writeFeatureSelection(modDir, selection)
+            val icon = iconFile(modDir)
             extractIcon(archive, icon)
-            _state.value = ImportedModState(
-                fileName = displayName(context, uri) ?: archive.name,
-                metadata = metadata,
-                isEnabled = true,
-                features = manifest.features,
-                featureGroups = manifest.featureGroups,
-                featureSelection = selection,
-                iconLastModified = icon.takeIf { it.isFile }?.lastModified() ?: 0L,
-                error = null
-            )
+            writeSelectedModId(context, modDir.name)
             ModFilesRepository.clearPreparedFiles(context)
+            refreshState(context)
             true
         }.getOrElse { error ->
-            clearStoredMod(context)
             ModFilesRepository.clearPreparedFiles(context)
-            _state.value = ImportedModState(error = error.message ?: error::class.java.simpleName)
+            _state.value = _state.value.copy(error = error.message ?: error::class.java.simpleName)
             false
         }
     }
 
     private fun importedDir(context: Context): File = File(context.filesDir, IMPORTED_DIR)
 
-    private fun metadataFile(context: Context): File = File(importedDir(context), ACTIVE_METADATA_FILE)
+    private fun modDirsRoot(context: Context): File = importedDir(context)
 
-    private fun featureSelectionFile(context: Context): File = File(importedDir(context), ACTIVE_FEATURE_SELECTION_FILE)
+    private fun listModDirs(context: Context): List<File> {
+        return modDirsRoot(context).listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+    }
 
-    private fun modStateFile(context: Context): File = File(importedDir(context), ACTIVE_MOD_STATE_FILE)
+    private fun archiveFile(modDir: File): File = File(modDir, MOD_ARCHIVE_FILE)
 
-    private fun writeMetadata(context: Context, metadata: ImportedModMetadata) {
+    private fun iconFile(modDir: File): File = File(modDir, MOD_ICON_FILE)
+
+    private fun metadataFile(modDir: File): File = File(modDir, MOD_METADATA_FILE)
+
+    private fun featureSelectionFile(modDir: File): File = File(modDir, MOD_FEATURE_SELECTION_FILE)
+
+    private fun modStateFile(modDir: File): File = File(modDir, MOD_STATE_FILE)
+
+    private fun selectedModFile(context: Context): File = File(importedDir(context), SELECTED_MOD_FILE)
+
+    private fun writeMetadata(modDir: File, metadata: ImportedModMetadata) {
         val json = JSONObject()
             .put("title", metadata.title)
             .put("description", metadata.description)
             .put("author", metadata.author)
             .put("version", metadata.version)
             .put("gameVersion", metadata.gameVersion)
-        metadataFile(context).writeText(json.toString())
+        metadataFile(modDir).writeText(json.toString())
     }
 
-    private fun readMetadata(context: Context): ImportedModMetadata? {
-        val file = metadataFile(context)
+    private fun readMetadata(modDir: File): ImportedModMetadata? {
+        val file = metadataFile(modDir)
         if (!file.isFile) return null
         return runCatching {
             val json = JSONObject(file.readText())
@@ -197,18 +258,27 @@ object ImportedModRepository {
     }
 
     fun setModEnabled(context: Context, isEnabled: Boolean) {
-        writeModEnabled(context, isEnabled)
+        val modDir = selectedModDir(context) ?: return
+        writeModEnabled(modDir, isEnabled)
         _state.value = _state.value.copy(isEnabled = isEnabled)
         ModFilesRepository.clearPreparedFiles(context)
         ModFilesRepository.refreshPreparedStateFromImportedMod(context)
     }
 
-    private fun writeModEnabled(context: Context, isEnabled: Boolean) {
-        modStateFile(context).writeText(JSONObject().put("enabled", isEnabled).toString())
+    fun setModEnabled(context: Context, modId: String, isEnabled: Boolean) {
+        val modDir = File(importedDir(context), modId)
+        if (!modDir.isDirectory) return
+        writeModEnabled(modDir, isEnabled)
+        ModFilesRepository.clearPreparedFiles(context)
+        refreshState(context)
     }
 
-    private fun readModEnabled(context: Context): Boolean {
-        val file = modStateFile(context)
+    private fun writeModEnabled(modDir: File, isEnabled: Boolean) {
+        modStateFile(modDir).writeText(JSONObject().put("enabled", isEnabled).toString())
+    }
+
+    private fun readModEnabled(modDir: File): Boolean {
+        val file = modStateFile(modDir)
         if (!file.isFile) return true
         return runCatching {
             JSONObject(file.readText()).optBoolean("enabled", true)
@@ -221,6 +291,7 @@ object ImportedModRepository {
         preferredFeatureId: String? = null
     ): ImportedModFeatureConflict? {
         val current = _state.value
+        val modDir = selectedModDir(context) ?: return null
         val disabledGroupIds = reconcileDisabledGroups(
             requested = selection.enabledFeatureIds,
             currentSelection = current.featureSelection,
@@ -235,21 +306,48 @@ object ImportedModRepository {
             preferredFeatureId,
             disabledGroupIds
         )
-        writeFeatureSelection(context, sanitized)
+        writeFeatureSelection(modDir, sanitized)
         _state.value = current.copy(featureSelection = sanitized)
         ModFilesRepository.clearPreparedFiles(context)
         ModFilesRepository.refreshPreparedStateFromImportedMod(context)
         return conflict
     }
 
-    private fun writeFeatureSelection(context: Context, selection: ImportedModFeatureSelection) {
+    fun updateFeatureSelection(
+        context: Context,
+        modId: String,
+        selection: ImportedModFeatureSelection,
+        preferredFeatureId: String? = null
+    ): ImportedModFeatureConflict? {
+        val current = refreshAndGetMod(context, modId) ?: return null
+        val disabledGroupIds = reconcileDisabledGroups(
+            requested = selection.enabledFeatureIds,
+            currentSelection = current.featureSelection,
+            groups = current.featureGroups,
+            preferredFeatureId = preferredFeatureId
+        )
+        val conflict = findConflict(selection.enabledFeatureIds, current.features, preferredFeatureId)
+        val sanitized = sanitizeSelection(
+            selection.enabledFeatureIds,
+            current.features,
+            current.featureGroups,
+            preferredFeatureId,
+            disabledGroupIds
+        )
+        writeFeatureSelection(File(importedDir(context), modId), sanitized)
+        ModFilesRepository.clearPreparedFiles(context)
+        refreshState(context)
+        return conflict
+    }
+
+    private fun writeFeatureSelection(modDir: File, selection: ImportedModFeatureSelection) {
         val enabledArray = org.json.JSONArray().apply {
             selection.enabledFeatureIds.sorted().forEach(::put)
         }
         val disabledGroupsArray = org.json.JSONArray().apply {
             selection.disabledGroupIds.sorted().forEach(::put)
         }
-        featureSelectionFile(context).writeText(
+        featureSelectionFile(modDir).writeText(
             JSONObject()
                 .put("enabledFeatureIds", enabledArray)
                 .put("disabledGroupIds", disabledGroupsArray)
@@ -258,15 +356,15 @@ object ImportedModRepository {
     }
 
     private fun readFeatureSelection(
-        context: Context,
+        modDir: File,
         features: List<ImportedModFeature>,
         groups: List<ImportedModFeatureGroup>
     ): ImportedModFeatureSelection {
         val defaults = defaultSelection(features, groups)
-        val file = featureSelectionFile(context)
+        val file = featureSelectionFile(modDir)
         if (!file.isFile) {
             if (features.isNotEmpty()) {
-                writeFeatureSelection(context, defaults)
+                writeFeatureSelection(modDir, defaults)
             }
             return defaults
         }
@@ -291,10 +389,30 @@ object ImportedModRepository {
             sanitizeSelection(requested, features, groups, disabledGroupIds = disabledGroupIds)
         }.getOrElse {
             if (features.isNotEmpty()) {
-                writeFeatureSelection(context, defaults)
+                writeFeatureSelection(modDir, defaults)
             }
             defaults
         }
+    }
+
+    private fun selectedModDir(context: Context): File? {
+        val id = _state.value.selectedModId ?: readSelectedModId(context) ?: return null
+        return File(importedDir(context), id).takeIf { it.isDirectory }
+    }
+
+    private fun refreshAndGetMod(context: Context, modId: String): ImportedModListItem? {
+        refreshState(context)
+        return _state.value.mods.firstOrNull { it.id == modId }
+    }
+
+    private fun readSelectedModId(context: Context): String? {
+        val file = selectedModFile(context)
+        if (!file.isFile) return null
+        return runCatching { JSONObject(file.readText()).optString("id", "").ifEmpty { null } }.getOrNull()
+    }
+
+    private fun writeSelectedModId(context: Context, modId: String) {
+        selectedModFile(context).writeText(JSONObject().put("id", modId).toString())
     }
 
     private fun defaultSelection(

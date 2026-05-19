@@ -12,6 +12,11 @@ data class OriginalAssetsState(
     val folderName: String? = null
 )
 
+data class OriginalAssetFile(
+    val path: String,
+    val uri: Uri
+)
+
 object OriginalAssetsRepository {
     private const val PREFS_NAME = "original_assets_repository"
     private const val KEY_TREE_URI = "tree_uri"
@@ -71,6 +76,13 @@ object OriginalAssetsRepository {
         }
     }
 
+    fun listFiles(context: Context): List<OriginalAssetFile> {
+        val root = getRoot(context) ?: return emptyList()
+        val result = ArrayList<OriginalAssetFile>()
+        collectFiles(root, "", result)
+        return result.sortedBy { it.path }
+    }
+
     private fun getDisplayName(context: Context): String? {
         val root = getRoot(context) ?: return null
         return root.name ?: getTreeUri(context)?.lastPathSegment
@@ -98,6 +110,17 @@ object OriginalAssetsRepository {
             }
         }
         return null
+    }
+
+    private fun collectFiles(directory: DocumentFile, prefix: String, result: MutableList<OriginalAssetFile>) {
+        directory.listFiles().forEach { child ->
+            val name = child.name ?: return@forEach
+            val path = if (prefix.isEmpty()) name else "$prefix/$name"
+            when {
+                child.isDirectory -> collectFiles(child, path, result)
+                child.isFile -> result += OriginalAssetFile(path = normalizePath(path), uri = child.uri)
+            }
+        }
     }
 
     private fun normalizePath(path: String): String {

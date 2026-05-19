@@ -512,199 +512,56 @@ private fun MainScreen() {
                 SectionCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         SectionTitle("Мод")
-                        Row(
+                        Button(
+                            enabled = !isRunning && !preparation.isPreparing,
+                            onClick = { modImportLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                         ) {
-                            if (importedIconBitmap != null) {
-                                Image(
-                                    bitmap = importedIconBitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(68.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                )
-                            }
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.Top,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    val title = importedModState.metadata?.title ?: selectedModFolderName ?: modFolderNotSelected
-                                    HtmlText(
-                                        html = title,
-                                        textSizeSp = 20f,
-                                        color = MaterialTheme.colorScheme.onSurface.toArgb(),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    importedModState.metadata?.version?.let { version ->
-                                        VersionBadge(text = version)
-                                    }
-                                }
-                                importedModState.metadata?.author?.let { author ->
-                                    HtmlText(
-                                        html = author,
-                                        textSizeSp = 14f,
-                                        color = MaterialTheme.colorScheme.primary.toArgb(),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                                importedModState.metadata?.description?.let { description ->
-                                    HtmlText(
-                                        html = description,
-                                        textSizeSp = 14f,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                            }
+                            Icon(
+                                imageVector = Icons.Rounded.Download,
+                                contentDescription = stringResource(R.string.button_import_mod),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
                         }
 
-                        if (selectedModFolderName == null) {
-                            Button(
-                                enabled = !isRunning && !preparation.isPreparing,
-                                onClick = { modImportLauncher.launch(arrayOf("*/*")) },
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Download,
-                                    contentDescription = stringResource(R.string.button_import_mod),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
-                            }
+                        if (importedModState.mods.isEmpty()) {
+                            Text(
+                                text = modFolderNotSelected,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = if (preparation.isPreparing) {
-                                        preparingLabel
-                                    } else {
-                                        when {
-                                            preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
-                                            preparation.error != null -> "$errorPrefix ${preparation.error}"
-                                            preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
-                                            else -> emptyLabel
-                                        }
+                            importedModState.mods.forEach { mod ->
+                                ImportedModListCard(
+                                    context = context,
+                                    mod = mod,
+                                    isRunning = isRunning,
+                                    preparation = preparation,
+                                    isSelectedForDetails = mod.id == importedModState.selectedModId,
+                                    showFeatures = showModFeatures && mod.id == importedModState.selectedModId,
+                                    onSelect = { ImportedModRepository.selectMod(context, mod.id) },
+                                    onToggleFeatures = {
+                                        ImportedModRepository.selectMod(context, mod.id)
+                                        showModFeatures = !showModFeatures
                                     },
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (preparation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                if (importedModState.isEnabled) {
-                                    IconButton(
-                                        enabled = !isRunning && !preparation.isPreparing,
-                                        onClick = { scope.launch { ModFilesRepository.prepareFiles(context) } },
-                                        modifier = Modifier.size(44.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Refresh,
-                                            contentDescription = stringResource(R.string.button_refresh_mod_files),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(26.dp)
-                                        )
-                                    }
-                                }
-                            }
-                            if (preparation.isPreparing) {
-                                if (preparation.totalCount > 0) {
-                                    CleanLinearProgressIndicator(
-                                        progress = preparation.progress,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                } else {
-                                    CleanIndeterminateProgressIndicator(
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Button(
-                                    enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = { ImportedModRepository.setModEnabled(context, !importedModState.isEnabled) },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(46.dp),
-                                    shape = RoundedCornerShape(6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-                                        contentColor = MaterialTheme.colorScheme.onSurface
-                                    )
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.PowerSettingsNew,
-                                        contentDescription = if (importedModState.isEnabled) disableModLabel else enableModLabel,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(if (importedModState.isEnabled) disableModLabel else enableModLabel, fontSize = 16.sp)
-                                }
-                                if (importedModState.isEnabled) {
-                                    Button(
-                                        enabled = !isRunning && !preparation.isPreparing,
-                                        onClick = { showImportedModDeleteConfirm = true },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(46.dp),
-                                        shape = RoundedCornerShape(6.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-                                            contentColor = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.DeleteOutline,
-                                            contentDescription = stringResource(R.string.button_remove_mod),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(stringResource(R.string.button_remove_mod), fontSize = 14.sp)
-                                    }
-                                }
-                                if (importedModState.isEnabled) {
-                                    IconButton(
-                                        enabled = importedModState.features.isNotEmpty() && !preparation.isPreparing && !isRunning,
-                                        onClick = { showModFeatures = !showModFeatures },
-                                        modifier = Modifier
-                                            .size(46.dp)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Settings,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (showModFeatures && importedModState.features.isNotEmpty()) {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
-                                FeatureSelectionSection(
-                                    features = importedModState.features,
-                                    groups = importedModState.featureGroups,
-                                    selectedIds = importedModState.featureSelection.enabledFeatureIds,
-                                    enabled = !preparation.isPreparing && !isRunning,
-                                    onSelectionChange = { selectedIds, preferredFeatureId ->
+                                    onToggleEnabled = {
+                                        ImportedModRepository.setModEnabled(context, mod.id, !mod.isEnabled)
+                                    },
+                                    onDelete = {
+                                        ImportedModRepository.selectMod(context, mod.id)
+                                        showImportedModDeleteConfirm = true
+                                    },
+                                    onRefresh = {
+                                        ImportedModRepository.selectMod(context, mod.id)
+                                        scope.launch { ModFilesRepository.prepareFiles(context) }
+                                    },
+                                    onFeatureSelectionChange = { selectedIds, preferredFeatureId ->
                                         val conflict = ImportedModRepository.updateFeatureSelection(
                                             context,
+                                            mod.id,
                                             ImportedModFeatureSelection(enabledFeatureIds = selectedIds),
                                             preferredFeatureId = preferredFeatureId
                                         )
@@ -715,7 +572,15 @@ private fun MainScreen() {
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }
-                                    }
+                                    },
+                                    fingerprintRequiredStatus = fingerprintRequiredStatus,
+                                    preparingLabel = preparingLabel,
+                                    readyLabel = readyLabel,
+                                    emptyLabel = emptyLabel,
+                                    errorPrefix = errorPrefix,
+                                    enableModLabel = enableModLabel,
+                                    disableModLabel = disableModLabel,
+                                    iconBitmap = if (mod.id == importedModState.selectedModId) importedIconBitmap else ImportedModRepository.iconFile(context, mod.id).takeIf { it.isFile }?.let { BitmapFactory.decodeFile(it.absolutePath) }
                                 )
                             }
                         }
@@ -1190,6 +1055,125 @@ private fun FeatureSelectionSection(
                     onSelectionChange(updated, if (enabled) feature.id else null)
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun ImportedModListCard(
+    context: Context,
+    mod: lilmuff1.bsml.state.ImportedModListItem,
+    isRunning: Boolean,
+    preparation: lilmuff1.bsml.state.ModPreparationState,
+    isSelectedForDetails: Boolean,
+    showFeatures: Boolean,
+    onSelect: () -> Unit,
+    onToggleFeatures: () -> Unit,
+    onToggleEnabled: () -> Unit,
+    onDelete: () -> Unit,
+    onRefresh: () -> Unit,
+    onFeatureSelectionChange: (Set<String>, String?) -> Unit,
+    fingerprintRequiredStatus: String,
+    preparingLabel: String,
+    readyLabel: String,
+    emptyLabel: String,
+    errorPrefix: String,
+    enableModLabel: String,
+    disableModLabel: String,
+    iconBitmap: Bitmap?
+) {
+    SectionCard(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f), contentPadding = 14.dp) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                iconBitmap?.let { icon ->
+                    Image(
+                        bitmap = icon.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier.size(56.dp).clip(RoundedCornerShape(10.dp))
+                    )
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                        HtmlText(
+                            html = mod.metadata?.title ?: mod.fileName,
+                            textSizeSp = 18f,
+                            color = MaterialTheme.colorScheme.onSurface.toArgb(),
+                            modifier = Modifier.weight(1f)
+                        )
+                        mod.metadata?.version?.let { VersionBadge(text = it) }
+                    }
+                    mod.metadata?.author?.let {
+                        HtmlText(html = it, textSizeSp = 13f, color = MaterialTheme.colorScheme.primary.toArgb(), modifier = Modifier.fillMaxWidth())
+                    }
+                    mod.metadata?.description?.let {
+                        HtmlText(html = it, textSizeSp = 13f, color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(), modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = if (!mod.isEnabled) {
+                        emptyLabel
+                    } else if (preparation.isPreparing && isSelectedForDetails) {
+                        preparingLabel
+                    } else if (isSelectedForDetails) {
+                        when {
+                            preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
+                            preparation.error != null -> "$errorPrefix ${preparation.error}"
+                            preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
+                            else -> emptyLabel
+                        }
+                    } else {
+                        if (mod.isEnabled) "Включен" else "Выключен"
+                    },
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                IconButton(enabled = mod.isEnabled && !isRunning && !preparation.isPreparing, onClick = onRefresh, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.button_refresh_mod_files), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+                }
+            }
+
+            if (isSelectedForDetails && preparation.isPreparing) {
+                if (preparation.totalCount > 0) {
+                    CleanLinearProgressIndicator(progress = preparation.progress, modifier = Modifier.fillMaxWidth())
+                } else {
+                    CleanIndeterminateProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(enabled = !isRunning && !preparation.isPreparing, onClick = onToggleEnabled, modifier = Modifier.weight(1f).height(46.dp), shape = RoundedCornerShape(6.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), contentColor = MaterialTheme.colorScheme.onSurface)) {
+                    Icon(Icons.Rounded.PowerSettingsNew, contentDescription = if (mod.isEnabled) disableModLabel else enableModLabel, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (mod.isEnabled) disableModLabel else enableModLabel, fontSize = 16.sp)
+                }
+                Button(enabled = !isRunning && !preparation.isPreparing, onClick = onDelete, modifier = Modifier.weight(1f).height(46.dp), shape = RoundedCornerShape(6.dp), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), contentColor = MaterialTheme.colorScheme.onSurface)) {
+                    Icon(Icons.Rounded.DeleteOutline, contentDescription = stringResource(R.string.button_remove_mod), modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(stringResource(R.string.button_remove_mod), fontSize = 14.sp)
+                }
+                IconButton(enabled = mod.features.isNotEmpty() && !preparation.isPreparing && !isRunning, onClick = { onSelect(); onToggleFeatures() }, modifier = Modifier.size(46.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))) {
+                    Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+                }
+            }
+
+            if (showFeatures && mod.features.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                FeatureSelectionSection(
+                    features = mod.features,
+                    groups = mod.featureGroups,
+                    selectedIds = mod.featureSelection.enabledFeatureIds,
+                    enabled = !preparation.isPreparing && !isRunning,
+                    onSelectionChange = onFeatureSelectionChange
+                )
+            }
         }
     }
 }

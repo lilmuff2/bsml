@@ -9,18 +9,28 @@ import lilmuff1.bsml.state.OriginalAssetsRepository
 import org.json.JSONArray
 import org.json.JSONObject
 
-class OriginalAssetProvider(private val context: Context) {
+class OriginalAssetProvider(
+    private val context: Context,
+    private val workingDir: File? = null
+) {
     private val filesDir: File = context.filesDir
     private val fingerprintFiles: Map<String, String> by lazy { readFingerprintFiles() }
 
     fun resolveCsv(tableName: String): OriginalAsset {
         val path = resolveCsvPath(tableName)
-        val bytes = OriginalAssetsRepository.openByGamePath(context, path)
+        val bytes = readWorking(path)
+            ?: OriginalAssetsRepository.openByGamePath(context, path)
             ?: OriginalAssetsRepository.openByFileName(context, path.substringAfterLast('/'))
             ?: readCached(path)
             ?: downloadOriginal(path)
             ?: error("original_not_found:$path")
         return OriginalAsset(path = path, bytes = bytes)
+    }
+
+    private fun readWorking(path: String): ByteArray? {
+        val dir = workingDir ?: return null
+        val file = File(dir, path)
+        return if (file.isFile) file.readBytes() else null
     }
 
     private fun resolveCsvPath(tableName: String): String {

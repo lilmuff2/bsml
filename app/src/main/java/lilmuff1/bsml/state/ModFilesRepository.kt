@@ -132,9 +132,9 @@ object ModFilesRepository {
                 )
                 return@withContext false
             }
-            val activeArchive = ImportedModRepository.activeArchiveFile(context)
-            if (activeArchive.isFile) {
-                return@withContext prepareImportedArchive(context, activeArchive)
+            val enabledArchives = ImportedModRepository.enabledArchives(context)
+            if (enabledArchives.isNotEmpty()) {
+                return@withContext prepareImportedArchives(context, enabledArchives)
             }
 
             val folderName = getDisplayName(context)
@@ -313,10 +313,10 @@ object ModFilesRepository {
         File(context.filesDir, PREPARED_FILES_DIR).deleteRecursively()
     }
 
-    private suspend fun prepareImportedArchive(context: Context, archive: File): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun prepareImportedArchives(context: Context, archives: List<File>): Boolean = withContext(Dispatchers.IO) {
         ImportedModRepository.refreshState(context)
         val imported = ImportedModRepository.state.value
-        val folderName = imported.metadata?.title ?: imported.fileName ?: archive.name
+        val folderName = imported.metadata?.title ?: imported.fileName ?: archives.first().name
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = true,
@@ -326,21 +326,29 @@ object ModFilesRepository {
             error = null
         )
         runCatching {
-            VpnLogRepository.log(
-                "NBASSETS prepare imported enabled=${imported.isEnabled} selected=${imported.featureSelection.enabledFeatureIds.sorted()}"
-            )
-            val prepared = if (imported.isEnabled) {
-                NbAssetsCompiler(
+            VpnLogRepository.log("NBASSETS prepare imported mods=${archives.size}")
+            val outputDir = File(context.filesDir, PREPARED_FILES_DIR)
+            outputDir.deleteRecursively()
+            val preparedMap = LinkedHashMap<String, PreparedModFile>()
+            archives.forEachIndexed { index, archive ->
+                val modId = archive.parentFile?.name ?: return@forEachIndexed
+                ImportedModRepository.selectMod(context, modId)
+                val currentImported = ImportedModRepository.state.value
+                VpnLogRepository.log(
+                    "NBASSETS prepare imported mod=${currentImported.fileName} enabled=${currentImported.isEnabled} selected=${currentImported.featureSelection.enabledFeatureIds.sorted()}"
+                )
+                if (!currentImported.isEnabled) return@forEachIndexed
+                val prepared = NbAssetsCompiler(
                     context = context,
-                    enabledFeatureIds = imported.featureSelection.enabledFeatureIds
+                    enabledFeatureIds = currentImported.featureSelection.enabledFeatureIds
                 ).compile(
                     archive = archive,
-                    outputDir = File(context.filesDir, PREPARED_FILES_DIR)
+                    outputDir = outputDir,
+                    clearOutput = index == 0
                 )
-            } else {
-                File(context.filesDir, PREPARED_FILES_DIR).deleteRecursively()
-                emptyList()
+                prepared.forEach { preparedMap[it.path] = it }
             }
+            val prepared = preparedMap.values.sortedBy { it.path }
             writePreparedIndex(context, prepared)
             _preparation.value = ModPreparationState(
                 folderName = folderName,
