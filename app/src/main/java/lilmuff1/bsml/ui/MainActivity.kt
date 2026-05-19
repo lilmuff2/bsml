@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
-import android.os.Build
 import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
@@ -15,6 +14,7 @@ import android.text.Html
 import android.text.method.LinkMovementMethod
 import android.content.pm.PackageManager
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -51,6 +51,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.DoNotDisturbAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -99,6 +100,7 @@ import lilmuff1.bsml.state.CleanupReasonSpec
 import lilmuff1.bsml.state.ImportedModRepository
 import lilmuff1.bsml.state.ImportedModFeatureSelection
 import lilmuff1.bsml.state.LatestFingerprintRepository
+import lilmuff1.bsml.state.LatestFingerprintStore
 import lilmuff1.bsml.state.ModFilesRepository
 import lilmuff1.bsml.state.OriginalAssetsRepository
 import lilmuff1.bsml.state.VpnLogRepository
@@ -136,6 +138,8 @@ private fun MainScreen() {
     val isAutoVpnDisableEnabled by VpnLogRepository.isAutoVpnDisableEnabled.collectAsState()
     val isInstallResultNotificationsEnabled by VpnLogRepository.isInstallResultNotificationsEnabled.collectAsState()
     val showReinstallWarningAfterDelete by VpnLogRepository.showReinstallWarningAfterDelete.collectAsState()
+    val isAutoPrepareFilesEnabled by VpnLogRepository.isAutoPrepareFilesEnabled.collectAsState()
+    val autoPrepareFilesDelaySeconds by VpnLogRepository.autoPrepareFilesDelaySeconds.collectAsState()
     val isIpFilterEnabled by VpnLogRepository.isIpFilterEnabled.collectAsState()
     val ipFilterText by VpnLogRepository.ipFilterText.collectAsState()
     val packageText by VpnLogRepository.packageText.collectAsState()
@@ -153,6 +157,7 @@ private fun MainScreen() {
     var showModFeatures by remember { mutableStateOf(false) }
     var pendingManualLaunchHint by remember { mutableStateOf<PendingManualLaunchHint?>(null) }
     var showReinstallAfterDeleteWarning by remember { mutableStateOf(false) }
+    var showImportedModDeleteConfirm by remember { mutableStateOf(false) }
     val modFolderNotSelected = stringResource(R.string.value_mod_folder_not_selected)
     val stopLabel = stringResource(R.string.button_stop)
     val installLabel = stringResource(R.string.button_install_mod)
@@ -163,10 +168,15 @@ private fun MainScreen() {
     val readyLabel = stringResource(R.string.status_mod_ready)
     val emptyLabel = stringResource(R.string.status_mod_not_prepared)
     val errorPrefix = stringResource(R.string.status_mod_error_prefix)
+    val fingerprintRequiredStatus = stringResource(R.string.status_fingerprint_required_for_prepare)
     val latestFingerprintLabel = stringResource(R.string.label_latest_fingerprint)
     val latestFingerprintNotLoaded = stringResource(R.string.value_latest_fingerprint_not_loaded)
     val latestGameServerLabel = stringResource(R.string.label_latest_game_server)
     val latestGameServerNotLoaded = stringResource(R.string.value_latest_game_server_not_loaded)
+    val vpnPermissionDeniedStatus = stringResource(R.string.status_vpn_permission_denied)
+    val vpnPermissionDeniedLog = stringResource(R.string.log_vpn_permission_denied)
+    val featureConflictToast = stringResource(R.string.toast_feature_conflict)
+    val invalidModArchiveToast = stringResource(R.string.toast_invalid_mod_archive)
     val selectedModFolderName = preparation.folderName
     val isInstallEnabled = !isRunning && selectedModFolderName != null && preparation.isReady && !preparation.isPreparing
     val modContentAlpha = if (selectedModFolderName != null && !importedModState.isEnabled) 0.48f else 1f
@@ -182,16 +192,25 @@ private fun MainScreen() {
             OriginalAssetsRepository.refreshState(context)
             ModFilesRepository.refreshState(context)
             LatestFingerprintRepository.refreshState(context)
+            LatestFingerprintRepository.fetchLatest(context)
         }
     }
 
     LaunchedEffect(
         importedModState.fileName,
         importedModState.isEnabled,
-        importedModState.featureSelection.enabledFeatureIds
+        importedModState.featureSelection.enabledFeatureIds,
+        isAutoPrepareFilesEnabled,
+        autoPrepareFilesDelaySeconds,
+        latestFingerprintState.savedRootSha
     ) {
-        if (importedModState.fileName != null && !isRunning) {
-            delay(3_000)
+        if (
+            isAutoPrepareFilesEnabled &&
+            importedModState.fileName != null &&
+            latestFingerprintState.savedRootSha != null &&
+            !isRunning
+        ) {
+            delay(VpnLogRepository.autoPrepareFilesDelayMillisNow())
             val currentPreparation = ModFilesRepository.preparation.value
             if (!currentPreparation.isPreparing && !currentPreparation.isReady) {
                 ModFilesRepository.prepareFiles(context)
@@ -216,8 +235,8 @@ private fun MainScreen() {
                 launchConfiguredGameWhenVpnReady(context)
             }
         } else {
-            VpnLogRepository.setStatus(context.getString(R.string.status_vpn_permission_denied))
-            VpnLogRepository.log(context.getString(R.string.log_vpn_permission_denied))
+            VpnLogRepository.setStatus(vpnPermissionDeniedStatus)
+            VpnLogRepository.log(vpnPermissionDeniedLog)
         }
     }
     val folderPickerLauncher = rememberLauncherForActivityResult(
@@ -248,8 +267,12 @@ private fun MainScreen() {
                     ImportedModRepository.importMod(context, uri)
                 }
                 if (imported) {
+                    if (LatestFingerprintStore.readStoredClientHelloHash(context.filesDir).isNullOrBlank()) {
+                        LatestFingerprintRepository.fetchLatest(context)
+                    }
                     ModFilesRepository.prepareFiles(context)
                 } else {
+                    Toast.makeText(context, invalidModArchiveToast, Toast.LENGTH_SHORT).show()
                     ModFilesRepository.refreshState(context)
                 }
             }
@@ -280,6 +303,8 @@ private fun MainScreen() {
             isAutoVpnDisableEnabled = isAutoVpnDisableEnabled,
             isInstallResultNotificationsEnabled = isInstallResultNotificationsEnabled,
             showReinstallWarningAfterDelete = showReinstallWarningAfterDelete,
+            isAutoPrepareFilesEnabled = isAutoPrepareFilesEnabled,
+            autoPrepareFilesDelaySeconds = autoPrepareFilesDelaySeconds,
             isIpFilterEnabled = isIpFilterEnabled,
             ipFilterText = ipFilterText,
             packageText = packageText,
@@ -309,6 +334,12 @@ private fun MainScreen() {
             },
             onShowReinstallWarningAfterDeleteChange = { enabled ->
                 VpnLogRepository.setShowReinstallWarningAfterDelete(context, enabled)
+            },
+            onAutoPrepareFilesEnabledChange = { enabled ->
+                VpnLogRepository.setAutoPrepareFilesEnabled(context, enabled)
+            },
+            onAutoPrepareFilesDelaySecondsChange = { value ->
+                VpnLogRepository.setAutoPrepareFilesDelaySeconds(context, value)
             },
             onFetchLatest = {
                 scope.launch {
@@ -389,6 +420,35 @@ private fun MainScreen() {
         )
     }
 
+    if (showImportedModDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showImportedModDeleteConfirm = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showImportedModDeleteConfirm = false
+                        ImportedModRepository.clear(context)
+                        ModFilesRepository.refreshState(context)
+                    }
+                ) {
+                    Text(stringResource(R.string.button_remove_mod))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportedModDeleteConfirm = false }) {
+                    Text(stringResource(R.string.button_cancel))
+                }
+            },
+            title = { Text(stringResource(R.string.title_delete_imported_mod_confirm)) },
+            text = {
+                Text(
+                    text = stringResource(R.string.message_delete_imported_mod_confirm),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        )
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
@@ -434,24 +494,26 @@ private fun MainScreen() {
 
                 SectionCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        SectionTitle("Что делать")
-                        GuidanceStep(number = 1, text = "Выбери папку мода и дождись подготовки файлов")
-                        GuidanceStep(number = 2, text = "Нажми установить или удалить мод")
-                        GuidanceStep(number = 3, text = if (autoLaunchPackage != null) "Игра запустится автоматически, дождись входа в меню. При большом моде это может занять заметное время" else "Открой игру вручную и дождись входа в меню. При большом моде это может занять заметное время")
-                        GuidanceStep(number = 4, text = "Если что-то пошло не так, нажми нижнюю кнопку Удалить, чтобы очистить все моды")
+                        SectionTitle(stringResource(R.string.title_guidance))
+                        GuidanceStep(number = 1, text = stringResource(R.string.guidance_step_select_mod))
+                        GuidanceStep(number = 2, text = stringResource(R.string.guidance_step_action))
+                        GuidanceStep(
+                            number = 3,
+                            text = if (autoLaunchPackage != null) {
+                                stringResource(R.string.guidance_step_auto_launch)
+                            } else {
+                                stringResource(R.string.guidance_step_manual_launch)
+                            }
+                        )
+                        GuidanceStep(number = 4, text = stringResource(R.string.guidance_step_cleanup_on_problem))
                     }
                 }
 
-                SectionCard(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
-                    contentPadding = 0.dp
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                SectionCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionTitle("Мод")
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 12.dp)
-                                .alpha(modContentAlpha),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.Top,
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
@@ -460,28 +522,13 @@ private fun MainScreen() {
                                     bitmap = importedIconBitmap.asImageBitmap(),
                                     contentDescription = null,
                                     modifier = Modifier
-                                        .size(74.dp)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .size(68.dp)
+                                        .clip(RoundedCornerShape(12.dp))
                                 )
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(74.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Download,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(30.dp)
-                                    )
-                                }
                             }
                             Column(
                                 modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -491,7 +538,7 @@ private fun MainScreen() {
                                     val title = importedModState.metadata?.title ?: selectedModFolderName ?: modFolderNotSelected
                                     HtmlText(
                                         html = title,
-                                        textSizeSp = 24f,
+                                        textSizeSp = 20f,
                                         color = MaterialTheme.colorScheme.onSurface.toArgb(),
                                         modifier = Modifier.weight(1f)
                                     )
@@ -502,110 +549,93 @@ private fun MainScreen() {
                                 importedModState.metadata?.author?.let { author ->
                                     HtmlText(
                                         html = author,
-                                        textSizeSp = 15f,
+                                        textSizeSp = 14f,
                                         color = MaterialTheme.colorScheme.primary.toArgb(),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                importedModState.metadata?.description?.let { description ->
+                                    HtmlText(
+                                        html = description,
+                                        textSizeSp = 14f,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
                             }
                         }
-                        importedModState.metadata?.description?.let { description ->
-                            HtmlText(
-                                html = description,
-                                textSizeSp = 17f,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp)
-                                    .alpha(modContentAlpha)
-                            )
-                        }
-                        if (selectedModFolderName != null && importedModState.isEnabled) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (preparation.isPreparing) {
-                                            preparingLabel
-                                        } else {
-                                            when {
-                                                preparation.error != null -> "$errorPrefix ${preparation.error}"
-                                                preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
-                                                else -> emptyLabel
-                                            }
-                                        },
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = if (preparation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    if (preparation.isPreparing) {
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        if (preparation.totalCount > 0) {
-                                            CleanLinearProgressIndicator(
-                                                progress = preparation.progress,
-                                                modifier = Modifier.fillMaxWidth()
-                                            )
-                                        } else {
-                                            CleanIndeterminateProgressIndicator(
-                                                modifier = Modifier.fillMaxWidth()
-                                            )
-                                        }
-                                    }
-                                }
-                                IconButton(
-                                    enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = { scope.launch { ModFilesRepository.prepareFiles(context) } },
-                                    modifier = Modifier
-                                        .height(40.dp)
-                                        .width(40.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = stringResource(R.string.button_refresh_mod_files),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
+
                         if (selectedModFolderName == null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                            Button(
+                                enabled = !isRunning && !preparation.isPreparing,
+                                onClick = { modImportLauncher.launch(arrayOf("*/*")) },
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                             ) {
-                                Button(
-                                    enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = { modImportLauncher.launch(arrayOf("*/*")) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Download,
-                                        contentDescription = stringResource(R.string.button_import_mod),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
-                                }
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = stringResource(R.string.button_import_mod),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
                             }
                         } else {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = if (preparation.isPreparing) {
+                                        preparingLabel
+                                    } else {
+                                        when {
+                                            preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
+                                            preparation.error != null -> "$errorPrefix ${preparation.error}"
+                                            preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
+                                            else -> emptyLabel
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (preparation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (importedModState.isEnabled) {
+                                    IconButton(
+                                        enabled = !isRunning && !preparation.isPreparing,
+                                        onClick = { scope.launch { ModFilesRepository.prepareFiles(context) } },
+                                        modifier = Modifier.size(44.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Refresh,
+                                            contentDescription = stringResource(R.string.button_refresh_mod_files),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(26.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            if (preparation.isPreparing) {
+                                if (preparation.totalCount > 0) {
+                                    CleanLinearProgressIndicator(
+                                        progress = preparation.progress,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                } else {
+                                    CleanIndeterminateProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Button(
                                     enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = {
-                                        ImportedModRepository.setModEnabled(context, !importedModState.isEnabled)
-                                    },
+                                    onClick = { ImportedModRepository.setModEnabled(context, !importedModState.isEnabled) },
                                     modifier = Modifier
                                         .weight(1f)
                                         .height(46.dp),
@@ -626,14 +656,12 @@ private fun MainScreen() {
                                 if (importedModState.isEnabled) {
                                     Button(
                                         enabled = !isRunning && !preparation.isPreparing,
-                                        onClick = {
-                                            ImportedModRepository.clear(context)
-                                            ModFilesRepository.refreshState(context)
-                                        },
+                                        onClick = { showImportedModDeleteConfirm = true },
                                         modifier = Modifier
                                             .weight(1f)
                                             .height(46.dp),
                                         shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
                                             contentColor = MaterialTheme.colorScheme.onSurface
@@ -644,71 +672,51 @@ private fun MainScreen() {
                                             contentDescription = stringResource(R.string.button_remove_mod),
                                             modifier = Modifier.size(20.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(stringResource(R.string.button_remove_mod), fontSize = 16.sp)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(stringResource(R.string.button_remove_mod), fontSize = 14.sp)
                                     }
-                                    val isFeatureSettingsEnabled = importedModState.features.isNotEmpty() && !preparation.isPreparing
+                                }
+                                if (importedModState.isEnabled) {
                                     IconButton(
-                                        enabled = isFeatureSettingsEnabled,
+                                        enabled = importedModState.features.isNotEmpty() && !preparation.isPreparing && !isRunning,
                                         onClick = { showModFeatures = !showModFeatures },
                                         modifier = Modifier
-                                            .height(46.dp)
-                                            .width(46.dp)
+                                            .size(46.dp)
                                             .clip(RoundedCornerShape(6.dp))
-                                            .background(
-                                                if (isFeatureSettingsEnabled) {
-                                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
-                                                } else {
-                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-                                                }
-                                            )
+                                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Settings,
                                             contentDescription = null,
-                                            tint = if (isFeatureSettingsEnabled) {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                                            },
-                                            modifier = Modifier.size(28.dp)
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(24.dp)
                                         )
                                     }
                                 }
                             }
-                            if (!ImportedModRepository.hasActiveMod(context)) {
-                                OutlinedButton(
-                                    enabled = !isRunning && !preparation.isPreparing,
-                                    onClick = { modImportLauncher.launch(arrayOf("*/*")) },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 14.dp),
-                                    shape = RoundedCornerShape(6.dp),
-                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
-                                ) {
-                                    Text(stringResource(R.string.button_import_mod))
-                                }
-                            }
-                            if (
-                                showModFeatures &&
-                                importedModState.features.isNotEmpty()
-                            ) {
+
+                            if (showModFeatures && importedModState.features.isNotEmpty()) {
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
-                                Box(modifier = Modifier.padding(14.dp)) {
-                                    FeatureSelectionSection(
-                                        features = importedModState.features,
-                                        groups = importedModState.featureGroups,
-                                        selectedIds = importedModState.featureSelection.enabledFeatureIds,
-                                        enabled = !preparation.isPreparing && !isRunning,
-                                        onSelectionChange = { selectedIds, preferredFeatureId ->
-                                            ImportedModRepository.updateFeatureSelection(
+                                FeatureSelectionSection(
+                                    features = importedModState.features,
+                                    groups = importedModState.featureGroups,
+                                    selectedIds = importedModState.featureSelection.enabledFeatureIds,
+                                    enabled = !preparation.isPreparing && !isRunning,
+                                    onSelectionChange = { selectedIds, preferredFeatureId ->
+                                        val conflict = ImportedModRepository.updateFeatureSelection(
+                                            context,
+                                            ImportedModFeatureSelection(enabledFeatureIds = selectedIds),
+                                            preferredFeatureId = preferredFeatureId
+                                        )
+                                        if (conflict != null) {
+                                            Toast.makeText(
                                                 context,
-                                                ImportedModFeatureSelection(enabledFeatureIds = selectedIds),
-                                                preferredFeatureId = preferredFeatureId
-                                            )
+                                                featureConflictToast.format(conflict.featureName, conflict.conflictName),
+                                                Toast.LENGTH_SHORT
+                                            ).show()
                                         }
-                                    )
-                                }
+                                    }
+                                )
                             }
                         }
                     }
@@ -716,7 +724,7 @@ private fun MainScreen() {
 
                 SectionCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        SectionTitle("Действия")
+                        SectionTitle(stringResource(R.string.title_actions))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -968,12 +976,7 @@ private fun HtmlText(
             }
         },
         update = { view ->
-            view.text = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY)
-            } else {
-                @Suppress("DEPRECATION")
-                Html.fromHtml(html)
-            }
+            view.text = Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY)
             view.textSize = textSizeSp
             view.setTextColor(color)
             view.setLinkTextColor(android.graphics.Color.parseColor("#64B5F6"))
@@ -1041,7 +1044,12 @@ private fun SettingsSwitchRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled) { onCheckedChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Text(
             text = label,
             modifier = Modifier.weight(1f),
@@ -1066,13 +1074,53 @@ private fun FeatureSelectionSection(
     val featureMap = features.associateBy { it.id }
     val groupedIds = groups.flatMap { it.features }.toSet()
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionTitle("Фичи")
+        SectionTitle(stringResource(R.string.title_features))
         groups.forEach { group ->
-            Text(
-                text = group.name ?: group.id,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold
-            )
+            if (group.type == "RADIO_GROUP") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = enabled) {
+                            val updated = selectedIds.toMutableSet().apply {
+                                removeAll(group.features.toSet())
+                            }
+                            onSelectionChange(updated, null)
+                        },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = group.name ?: group.id,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    IconButton(
+                        enabled = enabled,
+                        onClick = {
+                            val updated = selectedIds.toMutableSet().apply {
+                                removeAll(group.features.toSet())
+                            }
+                            onSelectionChange(updated, null)
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DoNotDisturbAlt,
+                            contentDescription = stringResource(R.string.option_no_feature),
+                            tint = if (group.features.none { it in selectedIds }) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = group.name ?: group.id,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
             group.description?.let { description ->
                 Text(
                     text = description,
@@ -1084,9 +1132,24 @@ private fun FeatureSelectionSection(
                 group.features.forEach { featureId ->
                     val feature = featureMap[featureId] ?: return@forEach
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = enabled) {
+                                val updated = selectedIds.toMutableSet().apply {
+                                    removeAll(group.features.toSet())
+                                    add(featureId)
+                                }
+                                onSelectionChange(updated, featureId)
+                            }
+                            .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(feature.name ?: feature.id, style = MaterialTheme.typography.bodyMedium)
+                            feature.description?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                         RadioButton(
                             selected = featureId in selectedIds,
                             enabled = enabled,
@@ -1098,12 +1161,6 @@ private fun FeatureSelectionSection(
                                 onSelectionChange(updated, featureId)
                             }
                         )
-                        Column(modifier = Modifier.padding(start = 8.dp)) {
-                            Text(feature.name ?: feature.id, style = MaterialTheme.typography.bodyMedium)
-                            feature.description?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
                     }
                 }
             } else {
@@ -1143,6 +1200,8 @@ private fun SettingsDialog(
     isAutoVpnDisableEnabled: Boolean,
     isInstallResultNotificationsEnabled: Boolean,
     showReinstallWarningAfterDelete: Boolean,
+    isAutoPrepareFilesEnabled: Boolean,
+    autoPrepareFilesDelaySeconds: String,
     isIpFilterEnabled: Boolean,
     ipFilterText: String,
     packageText: String,
@@ -1160,6 +1219,8 @@ private fun SettingsDialog(
     onClearOriginalAssetsFolder: () -> Unit,
     onInstallResultNotificationsChange: (Boolean) -> Unit,
     onShowReinstallWarningAfterDeleteChange: (Boolean) -> Unit,
+    onAutoPrepareFilesEnabledChange: (Boolean) -> Unit,
+    onAutoPrepareFilesDelaySecondsChange: (String) -> Unit,
     onFetchLatest: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1178,7 +1239,7 @@ private fun SettingsDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                SectionTitle("Поведение")
+                SectionTitle(stringResource(R.string.title_behavior))
                 SettingsSwitchRow(
                     label = stringResource(R.string.label_install_result_notifications),
                     checked = isInstallResultNotificationsEnabled,
@@ -1246,7 +1307,7 @@ private fun SettingsDialog(
                         }
                     }
                 }
-                SectionTitle("Автозапуск")
+                SectionTitle(stringResource(R.string.title_auto_launch))
                 if (launchableApps.isNotEmpty()) {
                     Text(
                         text = stringResource(R.string.label_auto_launch_app),
@@ -1311,7 +1372,7 @@ private fun SettingsDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                SectionTitle("Fingerprint")
+                SectionTitle(stringResource(R.string.title_fingerprint))
                 LabeledValue(
                     label = latestFingerprintLabel,
                     value = latestFingerprintState.savedRootSha ?: latestFingerprintNotLoaded
@@ -1355,15 +1416,76 @@ private fun SettingsDialog(
                 ) {
                     Text(stringResource(R.string.button_fetch_latest_fingerprint))
                 }
-                SectionTitle("Прочее")
+                SectionTitle(stringResource(R.string.title_misc))
                 SettingsSwitchRow(
                     label = stringResource(R.string.label_reinstall_after_delete_warning),
                     checked = showReinstallWarningAfterDelete,
                     onCheckedChange = onShowReinstallWarningAfterDeleteChange
                 )
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_auto_prepare_files),
+                    checked = isAutoPrepareFilesEnabled,
+                    onCheckedChange = onAutoPrepareFilesEnabledChange,
+                    enabled = !isRunning
+                )
+                OutlinedTextField(
+                    value = autoPrepareFilesDelaySeconds,
+                    onValueChange = onAutoPrepareFilesDelaySecondsChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRunning && isAutoPrepareFilesEnabled,
+                    label = { Text(stringResource(R.string.label_auto_prepare_files_delay_seconds)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                OutlinedButton(
+                    onClick = { exportBsmlLogs(context) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(stringResource(R.string.button_export_logs))
+                }
+                SectionTitle(stringResource(R.string.title_author_links))
+                AuthorLinkRow(
+                    label = stringResource(R.string.label_author_telegram),
+                    url = "https://t.me/lilmuff1"
+                )
+                AuthorLinkRow(
+                    label = stringResource(R.string.label_author_discord),
+                    url = "https://discord.com/users/lilmuff1"
+                )
+                AuthorLinkRow(
+                    label = stringResource(R.string.label_author_github),
+                    url = "https://github.com/lilmuff2"
+                )
+                AuthorLinkRow(
+                    label = stringResource(R.string.label_author_website),
+                    url = "https://lilmuff1.xyz"
+                )
             }
         }
     )
+}
+
+@Composable
+private fun AuthorLinkRow(label: String, url: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { openExternalUrl(context, url) }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            text = url.removePrefix("https://"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
 }
 
 @Composable
@@ -1438,6 +1560,31 @@ private fun stopMonitoring(context: Context) {
     context.startService(
         Intent(context, AssetProxyService::class.java).setAction(AssetProxyService.ACTION_STOP)
     )
+}
+
+private fun exportBsmlLogs(context: Context) {
+    val logs = VpnLogRepository.exportLogsText().ifBlank { "BSMLLocalVpn logs are empty" }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "BSMLLocalVpn logs")
+        putExtra(Intent.EXTRA_TEXT, logs)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, context.getString(R.string.button_export_logs)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    )
+}
+
+private fun openExternalUrl(context: Context, url: String) {
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
+    }
 }
 
 private fun launchConfiguredGame(context: Context) {

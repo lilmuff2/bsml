@@ -21,10 +21,8 @@ interface TcpProxySessionCallbacks {
     fun sendToTun(packet: ByteArray)
     fun removeSession(key: SessionKey)
     fun shouldRewriteContentHash(): Boolean
-    fun shouldZeroClientHelloGameVersion(): Boolean
     fun onClientHelloContentHashObserved(contentHash: String)
     fun onClientHelloVersionObserved(version: String)
-    fun onClientHelloGameVersionZeroApplied()
     fun onFinalOriginalClientHello(contentHash: String)
     fun rewriteLoginFailedBody(body: ByteArray, version: Int): LoginFailedRewriteResult
     fun maybeBuildLocalLoginFailedResponse(
@@ -217,7 +215,6 @@ class TcpProxySession(
                 callbacks.onClientHelloContentHashObserved(oldContentHash)
                 val shouldRewriteThisClientHello =
                     shouldRewriteContentHash && !oldContentHash.startsWith(PATCH_NAMESPACE)
-                val shouldZeroGameVersion = callbacks.shouldZeroClientHelloGameVersion()
                 val clientHelloLog = buildString {
                     append("SC CLIENT_HELLO contentHash=")
                     if (shouldRewriteThisClientHello) {
@@ -228,36 +225,22 @@ class TcpProxySession(
                     append(" local LOGIN_FAILED rewriteMs=${elapsedMs(rewriteStartedAt)}")
                     append(" len=$payloadLength ver=$version")
                 }
-                val localLoginFailed = if (!shouldZeroGameVersion) {
-                    callbacks.maybeBuildLocalLoginFailedResponse(oldContentHash, clientHelloLog)
-                } else {
-                    null
-                }
+                val localLoginFailed = callbacks.maybeBuildLocalLoginFailedResponse(oldContentHash, clientHelloLog)
                 if (localLoginFailed != null) {
                     changed = true
                     sendPayloadFromServer(localLoginFailed)
                     null
-                } else if (shouldRewriteThisClientHello || shouldZeroGameVersion) {
+                } else if (shouldRewriteThisClientHello) {
                     rewriteClientHello(
                         body = body,
-                        forcedContentHash = if (shouldRewriteThisClientHello) PATCH_NAMESPACE else null,
-                        zeroGameVersion = shouldZeroGameVersion
+                        forcedContentHash = PATCH_NAMESPACE,
+                        zeroGameVersion = false
                     )?.also {
                         changed = true
-                        if (shouldZeroGameVersion) {
-                            callbacks.onClientHelloGameVersionZeroApplied()
-                        }
                         VpnLogRepository.log(
                             buildString {
                                 append("SC CLIENT_HELLO contentHash=")
-                                if (shouldRewriteThisClientHello) {
-                                    append("$oldContentHash->$PATCH_NAMESPACE")
-                                } else {
-                                    append(oldContentHash)
-                                }
-                                if (shouldZeroGameVersion) {
-                                    append(" game=0.0.0")
-                                }
+                                append("$oldContentHash->$PATCH_NAMESPACE")
                                 append(" rewriteMs=${elapsedMs(rewriteStartedAt)}")
                                 append(" len=$payloadLength ver=$version")
                             }

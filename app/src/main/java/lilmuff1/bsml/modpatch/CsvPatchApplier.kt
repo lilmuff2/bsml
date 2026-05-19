@@ -115,11 +115,6 @@ object CsvPatchApplier {
         return result
     }
 
-    private fun JSONObject.arrayOrNull(key: String): JSONArray? {
-        val value = get(key)
-        return value as? JSONArray
-    }
-
     private fun JSONArray.valuesList(): List<Any?> {
         return buildList {
             for (index in 0 until length()) {

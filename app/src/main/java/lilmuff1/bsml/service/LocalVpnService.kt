@@ -473,7 +473,6 @@ class LocalVpnService : VpnService() {
                 if (normalized.isNotEmpty()) {
                     InstallFlowRepository.setCurrentClientHelloHash(normalized)
                     if (normalized.startsWith(PATCH_NAMESPACE)) {
-                        InstallFlowRepository.markPatchedClientHelloSeen()
                         InstallFlowRepository.disableContentHashRewrite()
                     }
                 }
@@ -482,10 +481,6 @@ class LocalVpnService : VpnService() {
             override fun onClientHelloVersionObserved(version: String) {
                 VpnLogRepository.setLastClientVersion(appContext, version)
             }
-
-            override fun shouldZeroClientHelloGameVersion(): Boolean = false
-
-            override fun onClientHelloGameVersionZeroApplied() = Unit
 
             override fun onFinalOriginalClientHello(contentHash: String) {
                 handleFinalOriginalClientHello(contentHash, sessionState)
@@ -797,33 +792,6 @@ class LocalVpnService : VpnService() {
         }
     }
 
-    private fun scheduleAutoDisableAfterQuietTraffic() {
-        val generation = autoDisableGeneration.incrementAndGet()
-        thread(name = "bsml-disable-after-quiet-traffic", start = true) {
-            var observedTrafficVersion = VpnLogRepository.significantTrafficVersionNow()
-            while (
-                active &&
-                !Thread.currentThread().isInterrupted &&
-                autoDisableGeneration.get() == generation
-            ) {
-                try {
-                    Thread.sleep(AUTO_DISABLE_QUIET_MS)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return@thread
-                }
-
-                val currentTrafficVersion = VpnLogRepository.significantTrafficVersionNow()
-                if (currentTrafficVersion == observedTrafficVersion) {
-                    VpnLogRepository.log("SC final CLIENT_HELLO original rootSha; VPN interception disabled")
-                    disableVpnTunnelKeepService()
-                    return@thread
-                }
-                observedTrafficVersion = currentTrafficVersion
-            }
-        }
-    }
-
     private inner class ProxyState {
         private val sessions = ConcurrentHashMap<SessionKey, TcpProxySession>()
 
@@ -883,7 +851,6 @@ class LocalVpnService : VpnService() {
         private const val INSTALL_TEMPLATE_BODY_FILE = "body.bin"
         private const val INSTALL_TEMPLATE_META_FILE = "meta.json"
         private const val ROOT_SHA_REWRITE_ENABLED = true
-        private const val AUTO_DISABLE_QUIET_MS = 5_000L
     }
 }
 

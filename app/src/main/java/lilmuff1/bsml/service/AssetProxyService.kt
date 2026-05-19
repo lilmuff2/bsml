@@ -18,16 +18,30 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
 import lilmuff1.bsml.asset.LocalAssetProxyServer
+import lilmuff1.bsml.asset.PatchedAsset
 import lilmuff1.bsml.config.GENERATED_ASSET_DIR
 
 class AssetProxyService : Service() {
     private val assetProxyServer = LocalAssetProxyServer(
         onLog = { message -> VpnLogRepository.log(message) },
         openPatchedAsset = { path ->
-            val generated = runCatching {
-                File(filesDir, "$GENERATED_ASSET_DIR/$path").takeIf { it.isFile }?.readBytes()
-            }.getOrNull()
-            generated ?: ModFilesRepository.openPreparedFile(applicationContext, path)
+            val generated = File(filesDir, "$GENERATED_ASSET_DIR/$path")
+            if (generated.isFile) {
+                PatchedAsset(
+                    length = generated.length(),
+                    openStream = { generated.inputStream() }
+                )
+            } else {
+                ModFilesRepository.findPreparedFile(applicationContext, path)?.let { entry ->
+                    PatchedAsset(
+                        length = entry.size,
+                        openStream = {
+                            applicationContext.contentResolver.openInputStream(android.net.Uri.parse(entry.uri))
+                                ?: error("prepared asset open failed: ${entry.path}")
+                        }
+                    )
+                }
+            }
         },
         onFirstAssetRequest = {
         },

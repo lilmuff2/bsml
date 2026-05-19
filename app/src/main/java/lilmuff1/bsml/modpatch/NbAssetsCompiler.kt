@@ -15,6 +15,19 @@ class NbAssetsCompiler(
     private val context: Context,
     private val enabledFeatureIds: Set<String> = emptySet()
 ) {
+    companion object {
+        private const val LAST_MERGED_PATCH_JSON_FILE = "last_nbassets_patch.json"
+
+        @Volatile
+        private var lastMergedPatchJson: String? = null
+
+        fun lastMergedPatchJsonForTest(): String? = lastMergedPatchJson
+
+        fun lastMergedPatchJsonFile(context: Context): File {
+            return File(context.filesDir, LAST_MERGED_PATCH_JSON_FILE)
+        }
+    }
+
     fun compile(archive: File, outputDir: File): List<PreparedModFile> {
         val startedAt = System.nanoTime()
         VpnLogRepository.log("NBASSETS prepare start file=${archive.name}")
@@ -24,9 +37,15 @@ class NbAssetsCompiler(
         val contentJson = NbAssetsArchiveReader.readRootContentJson(archive)
         val provider = OriginalAssetProvider(context)
         val contentParts = buildContentParts(contentJson)
-        val patchFiles = contentParts.flatMap { patchFilePaths(it.json) }.toSet()
+        VpnLogRepository.log(
+            "NBASSETS compile enabledFeatures=${enabledFeatureIds.sorted()} activeParts=${contentParts.map { it.key ?: "<root>" }}"
+        )
+        val activePatchFiles = contentParts.flatMap { patchFilePaths(it.json) }.toSet()
+        val allPatchFiles = collectAllPatchFilePaths(contentJson)
+        val activeRoots = contentParts.map { it.root }.toSet()
+        val inactiveFeatureRoots = collectAllFeatureRoots(contentJson) - activeRoots
         val patchJson = JSONObject()
-        val roots = ArrayList<String>()
+        val roots = LinkedHashSet<String>()
         val prepared = LinkedHashMap<String, File>()
         var assetCount = 0
         var csvCount = 0
@@ -49,7 +68,7 @@ class NbAssetsCompiler(
             zip.entries().asSequence().forEach { entry ->
                 if (entry.isDirectory) return@forEach
                 val path = normalizePath(entry.name)
-                val assetPath = archiveAssetPath(path, roots, patchFiles) ?: return@forEach
+                val assetPath = archiveAssetPath(path, roots.toList(), allPatchFiles, inactiveFeatureRoots) ?: return@forEach
                 val output = File(outputDir, assetPath)
                 output.parentFile?.mkdirs()
                 zip.getInputStream(entry).use { input ->
@@ -59,7 +78,9 @@ class NbAssetsCompiler(
                 assetCount++
             }
         }
-        VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${patchFiles.size} parts=${contentParts.size}")
+        lastMergedPatchJson = patchJson.toString()
+        lastMergedPatchJsonFile(context).writeText(lastMergedPatchJson.orEmpty())
+        VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size}")
 
         patchJson.keysList()
             .sorted()
@@ -103,11 +124,21 @@ class NbAssetsCompiler(
         return result
     }
 
-    private fun archiveAssetPath(path: String, roots: List<String>, patchFiles: Set<String>): String? {
+    private fun archiveAssetPath(
+        path: String,
+        roots: List<String>,
+        patchFiles: Set<String>,
+        inactiveFeatureRoots: Set<String>
+    ): String? {
         if (path.startsWith("META-INF/") || path.startsWith("build/")) return null
         if (patchFiles.contains(path)) return null
+        if (inactiveFeatureRoots.any { root -> path == root || path.startsWith("$root/") }) return null
 
-        val relative = roots.asSequence()
+        val orderedRoots = roots
+            .filter { it.isNotEmpty() }
+            .sortedByDescending { it.length } +
+            roots.filter { it.isEmpty() }
+        val relative = orderedRoots.asSequence()
             .mapNotNull { root ->
                 if (root.isEmpty()) {
                     path
@@ -122,11 +153,15 @@ class NbAssetsCompiler(
         if (relative == ROOT_CONTENT_JSON) return null
         if (relative.endsWith(".csv")) return null
         if (relative.startsWith("icon") && relative.endsWith(".png") && relative == relative.substringAfterLast('/')) return null
-        return relative.ifEmpty { null }
+        return relative.ifEmpty { null }?.toFingerprintPath()
     }
 
     private fun normalizePath(path: String): String {
         return path.replace('\\', '/').trimStart('/')
+    }
+
+    private fun String.toFingerprintPath(): String {
+        return replace(" ", "")
     }
 
     private fun sha1Hex(bytes: ByteArray): String {
@@ -156,6 +191,31 @@ class NbAssetsCompiler(
         }
     }
 
+    private fun collectAllPatchFilePaths(contentJson: JSONObject): Set<String> {
+        val result = LinkedHashSet<String>()
+        result += patchFilePaths(contentJson)
+        val features = contentJson.optJSONObject("@features") ?: return result
+        features.keysList().forEach { key ->
+            features.optJSONObject(key)?.let { featureJson ->
+                result += patchFilePaths(featureJson)
+            }
+        }
+        return result
+    }
+
+    private fun collectAllFeatureRoots(contentJson: JSONObject): Set<String> {
+        val features = contentJson.optJSONObject("@features") ?: return emptySet()
+        return features.keysList()
+            .mapNotNull { key ->
+                features.optJSONObject(key)
+                    ?.takeIf { it.has("@root") }
+                    ?.optString("@root", "")
+                    ?.normalizeRoot()
+                    ?.takeIf { it.isNotEmpty() }
+            }
+            .toSet()
+    }
+
     private fun String.normalizeArchivePathOrNull(): String? {
         return replace('\\', '/').trimStart('/').takeIf { it.isNotBlank() }
     }
@@ -171,9 +231,7 @@ class NbAssetsCompiler(
         val features = contentJson.optJSONObject("@features") ?: return result
         features.keysList()
             .map { key -> key to features.getJSONObject(key) }
-            .filter { (key, json) ->
-                json.optBoolean("@enabled", true) && key in enabledFeatureIds
-            }
+            .filter { (key, _) -> key in enabledFeatureIds }
             .sortedWith { left, right ->
                 val priorityCompare = left.second.optInt("@priority", 0).compareTo(right.second.optInt("@priority", 0))
                 if (priorityCompare != 0) priorityCompare else left.first.compareTo(right.first)
@@ -181,7 +239,7 @@ class NbAssetsCompiler(
             .forEach { (key, json) ->
                 result += ContentPart(
                     json = json,
-                    root = json.optString("@root", key).normalizeRoot(),
+                    root = json.optString("@root", "").normalizeRoot(),
                     key = key
                 )
             }

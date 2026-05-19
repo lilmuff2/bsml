@@ -13,7 +13,6 @@ object InstallFlowRepository {
     private val patchedModAssetServed = AtomicBoolean(false)
     private val contentHashRewriteEnabled = AtomicBoolean(true)
     private val rootShaRewriteApplied = AtomicBoolean(false)
-    private val patchedClientHelloSeen = AtomicBoolean(false)
     private val originalRootAfterPatchSeen = AtomicBoolean(false)
     private val finalClientHelloSeen = AtomicBoolean(false)
     private val installResultNotified = AtomicBoolean(false)
@@ -27,7 +26,6 @@ object InstallFlowRepository {
         patchedModAssetServed.set(false)
         contentHashRewriteEnabled.set(true)
         rootShaRewriteApplied.set(false)
-        patchedClientHelloSeen.set(false)
         originalRootAfterPatchSeen.set(false)
         finalClientHelloSeen.set(false)
         installResultNotified.set(false)
@@ -91,12 +89,6 @@ object InstallFlowRepository {
     }
 
     fun wasRootShaRewriteApplied(): Boolean = rootShaRewriteApplied.get()
-
-    fun markPatchedClientHelloSeen() {
-        patchedClientHelloSeen.set(true)
-    }
-
-    fun wasPatchedClientHelloSeen(): Boolean = patchedClientHelloSeen.get()
 
     fun setCurrentClientHelloHash(contentHash: String?) {
         currentClientHelloHash = contentHash?.trim()?.ifEmpty { null }

@@ -41,8 +41,7 @@
         <service
             android:name=".service.AssetProxyService"
             android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:process=":assetproxy">
+            android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="local_asset_proxy" />

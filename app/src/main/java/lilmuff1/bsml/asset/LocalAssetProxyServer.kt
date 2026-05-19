@@ -4,6 +4,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -18,7 +19,7 @@ import lilmuff1.bsml.config.localAssetBaseUrl
 
 class LocalAssetProxyServer(
     private val onLog: (String) -> Unit,
-    private val openPatchedAsset: (String) -> ByteArray?,
+    private val openPatchedAsset: (String) -> PatchedAsset?,
     private val onFirstAssetRequest: () -> Unit,
     private val onPatchedAssetServed: (String) -> Unit
 ) {
@@ -134,7 +135,7 @@ class LocalAssetProxyServer(
         val patchedAsset = openPatchedAsset(assetPath)
         if (patchedAsset != null) {
             onPatchedAssetServed(assetPath)
-            onLog("ASSET $method $path normalized=$assetPath result=patched bytes=${patchedAsset.size}")
+            onLog("ASSET $method $path normalized=$assetPath result=patched bytes=${patchedAsset.length}")
             writePatchedAssetResponse(method, assetPath, patchedAsset, output)
             return
         }
@@ -202,7 +203,7 @@ class LocalAssetProxyServer(
     private fun writePatchedAssetResponse(
         method: String,
         path: String,
-        bytes: ByteArray,
+        asset: PatchedAsset,
         output: BufferedOutputStream
     ) {
         val contentType = when {
@@ -213,11 +214,18 @@ class LocalAssetProxyServer(
         }
         output.write("HTTP/1.1 200 OK\r\n".encodeToByteArray())
         output.write("Content-Type: $contentType\r\n".encodeToByteArray())
-        output.write("Content-Length: ${bytes.size}\r\n".encodeToByteArray())
+        output.write("Content-Length: ${asset.length}\r\n".encodeToByteArray())
         output.write("Connection: close\r\n".encodeToByteArray())
         output.write("\r\n".encodeToByteArray())
         if (!method.equals("HEAD", ignoreCase = true)) {
-            output.write(bytes)
+            asset.openStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    output.write(buffer, 0, read)
+                }
+            }
         }
         output.flush()
     }
@@ -307,6 +315,11 @@ class LocalAssetProxyServer(
         private const val SHA1_HEX_LENGTH = 40
     }
 }
+
+data class PatchedAsset(
+    val length: Long,
+    val openStream: () -> InputStream
+)
 
 private fun BufferedInputStream.readAsciiLine(): String? {
     val out = ByteArrayOutputStream()

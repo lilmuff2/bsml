@@ -124,6 +124,14 @@ object ModFilesRepository {
 
     suspend fun prepareFiles(context: Context): Boolean = prepareMutex.withLock {
         withContext(Dispatchers.IO) {
+            if (LatestFingerprintStore.readStoredClientHelloHash(context.filesDir).isNullOrBlank()) {
+                _preparation.value = _preparation.value.copy(
+                    isPreparing = false,
+                    isReady = false,
+                    error = "fingerprint_not_loaded"
+                )
+                return@withContext false
+            }
             val activeArchive = ImportedModRepository.activeArchiveFile(context)
             if (activeArchive.isFile) {
                 return@withContext prepareImportedArchive(context, activeArchive)
@@ -271,11 +279,15 @@ object ModFilesRepository {
     }
 
     fun getPreparedSha(context: Context, path: String): String? {
-        return listPreparedFiles(context).firstOrNull { it.path == normalizePath(path) }?.sha
+        return findPreparedFile(context, path)?.sha
+    }
+
+    fun findPreparedFile(context: Context, path: String): PreparedModFile? {
+        return listPreparedFiles(context).firstOrNull { it.path == normalizePath(path) }
     }
 
     fun openPreparedFile(context: Context, relativePath: String): ByteArray? {
-        val entry = listPreparedFiles(context).firstOrNull { it.path == normalizePath(relativePath) } ?: return null
+        val entry = findPreparedFile(context, relativePath) ?: return null
         return runCatching {
             context.contentResolver.openInputStream(Uri.parse(entry.uri))?.use { it.readBytes() }
         }.getOrNull()
@@ -314,6 +326,9 @@ object ModFilesRepository {
             error = null
         )
         runCatching {
+            VpnLogRepository.log(
+                "NBASSETS prepare imported enabled=${imported.isEnabled} selected=${imported.featureSelection.enabledFeatureIds.sorted()}"
+            )
             val prepared = if (imported.isEnabled) {
                 NbAssetsCompiler(
                     context = context,
@@ -441,7 +456,9 @@ object ModFilesRepository {
     }
 
     private fun normalizePath(path: String): String {
-        return path.replace('\\', '/').trimStart('/')
+        return path.replace('\\', '/')
+            .trimStart('/')
+            .replace(" ", "")
     }
 
     private fun prefs(context: Context) =

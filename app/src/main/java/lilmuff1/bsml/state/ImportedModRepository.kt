@@ -37,7 +37,13 @@ data class ImportedModFeatureGroup(
 )
 
 data class ImportedModFeatureSelection(
-    val enabledFeatureIds: Set<String> = emptySet()
+    val enabledFeatureIds: Set<String> = emptySet(),
+    val disabledGroupIds: Set<String> = emptySet()
+)
+
+data class ImportedModFeatureConflict(
+    val featureName: String,
+    val conflictName: String
 )
 
 data class ImportedModState(
@@ -65,13 +71,17 @@ object ImportedModRepository {
     fun refreshState(context: Context) {
         val archive = activeArchiveFile(context)
         val icon = activeIconFile(context)
+        if (archive.isFile && !isValidArchive(archive)) {
+            clearStoredMod(context)
+            _state.value = ImportedModState(error = "Invalid mod archive")
+            return
+        }
         if (archive.isFile && !icon.isFile) {
             extractIcon(archive, icon)
         }
         val metadata = readMetadata(context)
         val manifest = archive.takeIf { it.isFile }?.let { NbAssetsArchiveReader.readManifest(it) }
         val selection = readFeatureSelection(context, manifest?.features.orEmpty(), manifest?.featureGroups.orEmpty())
-        VpnLogRepository.log("MOD feature selection refresh enabled=${selection.enabledFeatureIds.sorted()}")
         _state.value = ImportedModState(
             fileName = archive.takeIf { it.isFile }?.name,
             metadata = metadata,
@@ -91,26 +101,40 @@ object ImportedModRepository {
     fun activeIconFile(context: Context): File = File(importedDir(context), ACTIVE_ICON_FILE)
 
     fun clear(context: Context) {
+        clearStoredMod(context)
+        _state.value = ImportedModState()
+        ModFilesRepository.clearPreparedFiles(context)
+    }
+
+    private fun clearStoredMod(context: Context) {
         activeArchiveFile(context).delete()
         metadataFile(context).delete()
         activeIconFile(context).delete()
         featureSelectionFile(context).delete()
         modStateFile(context).delete()
-        _state.value = ImportedModState()
-        ModFilesRepository.clearPreparedFiles(context)
     }
 
     fun importMod(context: Context, uri: Uri): Boolean {
         return runCatching {
             val dir = importedDir(context)
             dir.mkdirs()
+            val tempArchive = File(dir, "import_candidate.nbassets")
             val archive = activeArchiveFile(context)
             context.contentResolver.openInputStream(uri)?.use { input ->
-                archive.outputStream().use { output ->
+                tempArchive.outputStream().use { output ->
                     input.copyTo(output)
                 }
             } ?: error("open_failed")
 
+            if (!isValidArchive(tempArchive)) {
+                tempArchive.delete()
+                clearStoredMod(context)
+                ModFilesRepository.clearPreparedFiles(context)
+                error("invalid_nbassets_archive")
+            }
+
+            tempArchive.copyTo(archive, overwrite = true)
+            tempArchive.delete()
             val metadata = NbAssetsArchiveReader.readMetadata(archive)
             val manifest = NbAssetsArchiveReader.readManifest(archive)
             writeMetadata(context, metadata)
@@ -132,6 +156,8 @@ object ImportedModRepository {
             ModFilesRepository.clearPreparedFiles(context)
             true
         }.getOrElse { error ->
+            clearStoredMod(context)
+            ModFilesRepository.clearPreparedFiles(context)
             _state.value = ImportedModState(error = error.message ?: error::class.java.simpleName)
             false
         }
@@ -193,36 +219,40 @@ object ImportedModRepository {
         context: Context,
         selection: ImportedModFeatureSelection,
         preferredFeatureId: String? = null
-    ) {
+    ): ImportedModFeatureConflict? {
         val current = _state.value
-        VpnLogRepository.log(
-            "MOD feature selection request preferred=${preferredFeatureId ?: "<none>"} requested=${selection.enabledFeatureIds.sorted()}"
+        val disabledGroupIds = reconcileDisabledGroups(
+            requested = selection.enabledFeatureIds,
+            currentSelection = current.featureSelection,
+            groups = current.featureGroups,
+            preferredFeatureId = preferredFeatureId
         )
+        val conflict = findConflict(selection.enabledFeatureIds, current.features, preferredFeatureId)
         val sanitized = sanitizeSelection(
             selection.enabledFeatureIds,
             current.features,
             current.featureGroups,
-            preferredFeatureId
-        )
-        VpnLogRepository.log(
-            "MOD feature selection sanitized enabled=${sanitized.enabledFeatureIds.sorted()}"
+            preferredFeatureId,
+            disabledGroupIds
         )
         writeFeatureSelection(context, sanitized)
         _state.value = current.copy(featureSelection = sanitized)
-        VpnLogRepository.log(
-            "MOD feature selection applied enabled=${_state.value.featureSelection.enabledFeatureIds.sorted()}"
-        )
         ModFilesRepository.clearPreparedFiles(context)
         ModFilesRepository.refreshPreparedStateFromImportedMod(context)
+        return conflict
     }
 
     private fun writeFeatureSelection(context: Context, selection: ImportedModFeatureSelection) {
         val enabledArray = org.json.JSONArray().apply {
             selection.enabledFeatureIds.sorted().forEach(::put)
         }
+        val disabledGroupsArray = org.json.JSONArray().apply {
+            selection.disabledGroupIds.sorted().forEach(::put)
+        }
         featureSelectionFile(context).writeText(
             JSONObject()
                 .put("enabledFeatureIds", enabledArray)
+                .put("disabledGroupIds", disabledGroupsArray)
                 .toString()
         )
     }
@@ -250,7 +280,15 @@ object ImportedModRepository {
                     }
                 }
             }
-            sanitizeSelection(requested, features, groups)
+            val disabledGroupsArray = json.optJSONArray("disabledGroupIds")
+            val disabledGroupIds = buildSet {
+                if (disabledGroupsArray != null) {
+                    for (index in 0 until disabledGroupsArray.length()) {
+                        disabledGroupsArray.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+                    }
+                }
+            }
+            sanitizeSelection(requested, features, groups, disabledGroupIds = disabledGroupIds)
         }.getOrElse {
             if (features.isNotEmpty()) {
                 writeFeatureSelection(context, defaults)
@@ -280,11 +318,32 @@ object ImportedModRepository {
         return sanitizeSelection(enabled, features, groups)
     }
 
+    private fun reconcileDisabledGroups(
+        requested: Set<String>,
+        currentSelection: ImportedModFeatureSelection,
+        groups: List<ImportedModFeatureGroup>,
+        preferredFeatureId: String? = null
+    ): Set<String> {
+        val disabledGroups = currentSelection.disabledGroupIds.toMutableSet()
+        groups.filter { it.type == "RADIO_GROUP" }.forEach { group ->
+            val groupFeatureIds = group.features.toSet()
+            val hasRequestedSelection = requested.any { it in groupFeatureIds }
+            val hadCurrentSelection = currentSelection.enabledFeatureIds.any { it in groupFeatureIds }
+            val preferredInGroup = preferredFeatureId != null && preferredFeatureId in groupFeatureIds
+            when {
+                hasRequestedSelection || preferredInGroup -> disabledGroups -= group.id
+                hadCurrentSelection && !hasRequestedSelection && preferredFeatureId == null -> disabledGroups += group.id
+            }
+        }
+        return disabledGroups
+    }
+
     private fun sanitizeSelection(
         requested: Set<String>,
         features: List<ImportedModFeature>,
         groups: List<ImportedModFeatureGroup>,
-        preferredFeatureId: String? = null
+        preferredFeatureId: String? = null,
+        disabledGroupIds: Set<String> = emptySet()
     ): ImportedModFeatureSelection {
         val featureMap = features.associateBy { it.id }
         val validRequested = requested.filter { it in featureMap }.toMutableSet()
@@ -293,8 +352,11 @@ object ImportedModRepository {
             val selected = group.features.filter { it in validRequested }
             if (selected.size > 1) {
                 selected.drop(1).forEach(validRequested::remove)
-            } else if (selected.isEmpty()) {
-                group.features.firstOrNull()?.let(validRequested::add)
+            }
+            if (selected.isEmpty() && group.id !in disabledGroupIds) {
+                group.features.firstOrNull { featureId ->
+                    featureMap[featureId]?.enabledByDefault == true
+                }?.let(validRequested::add)
             }
         }
 
@@ -312,7 +374,48 @@ object ImportedModRepository {
                 finalSet += featureId
             }
         }
-        return ImportedModFeatureSelection(enabledFeatureIds = finalSet)
+        val validDisabledGroups = disabledGroupIds
+            .filter { disabledGroupId -> groups.any { it.id == disabledGroupId && it.type == "RADIO_GROUP" } }
+            .toSet()
+        return ImportedModFeatureSelection(
+            enabledFeatureIds = finalSet,
+            disabledGroupIds = validDisabledGroups
+        )
+    }
+
+    private fun findConflict(
+        requested: Set<String>,
+        features: List<ImportedModFeature>,
+        preferredFeatureId: String?
+    ): ImportedModFeatureConflict? {
+        val featureMap = features.associateBy { it.id }
+        fun displayName(id: String): String = featureMap[id]?.name?.takeIf { it.isNotBlank() } ?: id
+        val validRequested = requested.filter { it in featureMap }
+        val candidates = buildList {
+            preferredFeatureId?.takeIf { it in validRequested }?.let(::add)
+            validRequested.filter { it != preferredFeatureId }.forEach(::add)
+        }
+        candidates.forEach { featureId ->
+            val conflicts = featureMap[featureId]?.conflicts.orEmpty()
+            val conflictId = validRequested.firstOrNull { otherId ->
+                otherId != featureId &&
+                    (otherId in conflicts || featureId in featureMap[otherId]?.conflicts.orEmpty())
+            }
+            if (conflictId != null) {
+                return ImportedModFeatureConflict(displayName(featureId), displayName(conflictId))
+            }
+        }
+        return null
+    }
+
+    private fun isValidArchive(archive: File): Boolean {
+        return runCatching {
+            ZipFile(archive).use { zip ->
+                zip.getEntry("content.json") ?: return@runCatching false
+            }
+            NbAssetsArchiveReader.readRootContentJson(archive)
+            true
+        }.getOrDefault(false)
     }
 
     private fun extractIcon(archive: File, output: File) {

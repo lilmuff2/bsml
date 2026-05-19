@@ -14,7 +14,6 @@ import kotlin.math.min
 import kotlin.random.Random
 import java.util.concurrent.ConcurrentHashMap
 import lilmuff1.bsml.config.*
-import lilmuff1.bsml.protocol.ByteWriter
 import lilmuff1.bsml.protocol.LoginFailedPrefix
 import lilmuff1.bsml.protocol.LoginFailedTail
 import lilmuff1.bsml.protocol.debugLog
@@ -189,70 +188,6 @@ class LoginFailedRewriter(
             rootShaRewriteApplied = false,
             assetOrigins = assetOrigins.toList(),
             originalRootSha = originalHashes.rootSha
-        )
-    }
-
-    fun buildCleanupLocalResponse(
-        reasonCode: Int,
-        reasonName: String,
-        reasonText: String
-    ): LoginFailedRewriteResult {
-        val shouldRewriteFingerprint = reasonCode != 1
-        val localAssetUrl = localAssetBaseUrl()
-        val fingerprintJson = if (shouldRewriteFingerprint) createCleanupFingerprintJson() else null
-        val compressedFingerprint = if (shouldRewriteFingerprint && fingerprintJson != null) {
-            deflateFingerprint(fingerprintJson, "zlib")
-        } else {
-            null
-        }
-        val tailWriter = ByteWriter()
-        tailWriter.writeBoolean(false)
-        if (compressedFingerprint != null) {
-            tailWriter.writeByteString(compressedFingerprint)
-        } else {
-            tailWriter.writeString(null)
-        }
-        tailWriter.writeInt(1)
-        tailWriter.writeString(localAssetUrl)
-        tailWriter.writeInt(0)
-        tailWriter.writeInt(0)
-        tailWriter.writeString(null)
-        tailWriter.writeInt(0)
-        tailWriter.writeBoolean(true)
-        tailWriter.writeBoolean(false)
-        tailWriter.writeString("")
-        tailWriter.writeVInt(0)
-        tailWriter.writeString("")
-        tailWriter.writeBoolean(false)
-        tailWriter.writeBoolean(false)
-        tailWriter.writeBoolean(false)
-        tailWriter.writeBoolean(false)
-        tailWriter.writeBoolean(false)
-        val tail = tailWriter.toByteArray()
-        val body = LoginFailedPrefix(
-            reason = reasonCode,
-            fingerprint = null,
-            unknownString = null,
-            contentDownloadUrl = localAssetUrl,
-            updateUrl = null,
-            reasonText = reasonText,
-            maintenanceWaitSecs = 0,
-            suffix = tail
-        ).encode()
-        val rootSha = if (shouldRewriteFingerprint) extractPlainFingerprintRootSha(fingerprintJson) else null
-        return LoginFailedRewriteResult(
-            body = body,
-            hashes = FingerprintHashes(rootSha, null),
-            patchStats = FingerprintPatchStats(
-                fileShaPatched = if (shouldRewriteFingerprint) 1 else 0,
-                rootShaOld = null,
-                rootShaNew = rootSha,
-                mode = "delete"
-            ),
-            assetUrlRewritten = true,
-            rootShaRewriteApplied = false,
-            assetOrigins = emptyList(),
-            originalRootSha = null
         )
     }
 
@@ -692,6 +627,7 @@ class LoginFailedRewriter(
     val rewritten = applyRuntimeFingerprintMutations(
         fingerprintJson = base.json,
         basePatchStats = base.patchStats,
+        baseRootSha = base.rootSha,
         shouldPatchRootFingerprintSha = shouldPatchRootFingerprintSha,
         includeTriggerAsset = includeTriggerAsset
     )
@@ -814,11 +750,12 @@ class LoginFailedRewriter(
     private fun applyRuntimeFingerprintMutations(
         fingerprintJson: String,
         basePatchStats: FingerprintPatchStats,
+        baseRootSha: String?,
         shouldPatchRootFingerprintSha: Boolean,
         includeTriggerAsset: Boolean
     ): FingerprintRewriteResult {
     return try {
-        val oldRootSha = extractPlainFingerprintRootSha(fingerprintJson)
+        val oldRootSha = baseRootSha ?: extractPlainFingerprintRootSha(fingerprintJson)
         var rewrittenJson = fingerprintJson
         var patchStats = basePatchStats
 
@@ -837,13 +774,15 @@ class LoginFailedRewriter(
         var finalRootSha = oldRootSha
         if (shouldPatchRootFingerprintSha && !oldRootSha.isNullOrEmpty()) {
             val patchedRootSha = PATCH_NAMESPACE + randomShaSuffix()
-            rewrittenJson = replaceLikelyRootSha(rewrittenJson, oldRootSha, patchedRootSha)
+            val rootPatchedJson = replaceLikelyRootSha(rewrittenJson, oldRootSha, patchedRootSha)
                 ?: replaceRootShaPreservingJson(rewrittenJson, oldRootSha, patchedRootSha)
-                ?: rewrittenJson.also {
-                    VpnLogRepository.log("SC fingerprint rootSha in-place patch failed old=$oldRootSha")
-                }
-            finalRootSha = patchedRootSha
-            patchStats = patchStats.copy(rootShaOld = oldRootSha, rootShaNew = patchedRootSha)
+            if (rootPatchedJson != null) {
+                rewrittenJson = rootPatchedJson
+                finalRootSha = patchedRootSha
+                patchStats = patchStats.copy(rootShaOld = oldRootSha, rootShaNew = patchedRootSha)
+            } else {
+                VpnLogRepository.log("SC fingerprint rootSha in-place patch failed old=$oldRootSha")
+            }
         }
 
         FingerprintRewriteResult(

@@ -5,7 +5,6 @@ import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import lilmuff1.bsml.config.DEFAULT_CAPTURE_PACKAGES
@@ -39,10 +38,11 @@ object VpnLogRepository {
     private const val KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED = "install_result_notifications_enabled"
     private const val KEY_LAST_CLIENT_VERSION = "last_client_version"
     private const val KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE = "show_reinstall_warning_after_delete"
+    private const val KEY_AUTO_PREPARE_FILES_ENABLED = "auto_prepare_files_enabled"
+    private const val KEY_AUTO_PREPARE_FILES_DELAY_SECONDS = "auto_prepare_files_delay_seconds"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
 
     private val logLock = Any()
-    private val significantTrafficVersion = AtomicLong(0)
     private val timeFormat = ThreadLocal.withInitial {
         SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     }
@@ -91,6 +91,12 @@ object VpnLogRepository {
     private val _showReinstallWarningAfterDelete = MutableStateFlow(true)
     val showReinstallWarningAfterDelete = _showReinstallWarningAfterDelete.asStateFlow()
 
+    private val _isAutoPrepareFilesEnabled = MutableStateFlow(true)
+    val isAutoPrepareFilesEnabled = _isAutoPrepareFilesEnabled.asStateFlow()
+
+    private val _autoPrepareFilesDelaySeconds = MutableStateFlow("3")
+    val autoPrepareFilesDelaySeconds = _autoPrepareFilesDelaySeconds.asStateFlow()
+
     private val _deleteCleanupPending = MutableStateFlow(false)
     val deleteCleanupPending = _deleteCleanupPending.asStateFlow()
 
@@ -113,6 +119,8 @@ object VpnLogRepository {
             _isInstallResultNotificationsEnabled.value = prefs.getBoolean(KEY_INSTALL_RESULT_NOTIFICATIONS_ENABLED, false)
             _lastClientVersion.value = prefs.getString(KEY_LAST_CLIENT_VERSION, null)?.trim()?.ifEmpty { null }
             _showReinstallWarningAfterDelete.value = prefs.getBoolean(KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE, true)
+            _isAutoPrepareFilesEnabled.value = prefs.getBoolean(KEY_AUTO_PREPARE_FILES_ENABLED, true)
+            _autoPrepareFilesDelaySeconds.value = prefs.getInt(KEY_AUTO_PREPARE_FILES_DELAY_SECONDS, 3).toString()
             preferencesLoaded = true
         }
     }
@@ -239,6 +247,28 @@ object VpnLogRepository {
 
     fun shouldShowReinstallWarningAfterDeleteNow(): Boolean = _showReinstallWarningAfterDelete.value
 
+    fun setAutoPrepareFilesEnabled(context: Context, isEnabled: Boolean) {
+        _isAutoPrepareFilesEnabled.value = isEnabled
+        updatePreference(context) { putBoolean(KEY_AUTO_PREPARE_FILES_ENABLED, isEnabled) }
+    }
+
+    fun isAutoPrepareFilesEnabledNow(): Boolean = _isAutoPrepareFilesEnabled.value
+
+    fun setAutoPrepareFilesDelaySeconds(context: Context, text: String) {
+        val normalized = text.filter { it.isDigit() }
+            .take(3)
+            .toIntOrNull()
+            ?.coerceIn(1, 120)
+            ?: 3
+        _autoPrepareFilesDelaySeconds.value = normalized.toString()
+        updatePreference(context) { putInt(KEY_AUTO_PREPARE_FILES_DELAY_SECONDS, normalized) }
+    }
+
+    fun autoPrepareFilesDelayMillisNow(): Long {
+        val seconds = _autoPrepareFilesDelaySeconds.value.toIntOrNull()?.coerceIn(1, 120) ?: 3
+        return seconds * 1_000L
+    }
+
     fun markDeleteCleanupPending() {
         _deleteCleanupPending.value = true
     }
@@ -268,23 +298,16 @@ object VpnLogRepository {
         _logs.value = emptyList()
     }
 
-    fun significantTrafficVersionNow(): Long = significantTrafficVersion.get()
+    fun exportLogsText(): String {
+        return _logs.value.asReversed().joinToString(separator = "\n")
+    }
 
     fun log(message: String) {
-        if (isSignificantTraffic(message)) {
-            significantTrafficVersion.incrementAndGet()
-        }
         val timestamp = timeFormat.get()?.format(Date()) ?: ""
         val line = "[$timestamp] $message"
         Log.d(TAG, line)
         synchronized(logLock) {
             _logs.value = listOf(line) + _logs.value.take(MAX_LOGS - 1)
         }
-    }
-
-    private fun isSignificantTraffic(message: String): Boolean {
-        return message.startsWith("SC CLIENT_HELLO") ||
-            message.startsWith("SC LOGIN_FAILED") ||
-            message.startsWith("ASSET GET")
     }
 }
