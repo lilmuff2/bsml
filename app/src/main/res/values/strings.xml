@@ -78,7 +78,7 @@
     <string name="toast_feature_conflict">%1$s conflicts with %2$s</string>
     <string name="toast_mod_imported_from_file">Mod imported</string>
     <string name="toast_mod_unverified_signature">Unverified mod and may not work: archive is not signed with correct signature</string>
-    <string name="warning_mod_unverified_signature">Unverified mod and may not work: archive is not signed with correct signature</string>
+    <string name="warning_mod_unverified_signature">Unverified mod and may not work</string>
     <string name="warning_mod_old_game_version">Mod is for an older version of the game (%1$d), current version: %2$d</string>
     <string name="option_no_feature">None</string>
     <string name="label_author_telegram" translatable="false">Telegram</string>
