@@ -43,6 +43,7 @@ object VpnLogRepository {
     private const val KEY_EXPORT_LOG_LINES = "export_log_lines"
     private const val KEY_THOROUGH_MOD_DELETE = "thorough_mod_delete"
     private const val KEY_SERVER_REGION = "server_region"
+    private const val KEY_APP_LANGUAGE = "app_language"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
 
     private val logLock = Any()
@@ -112,6 +113,9 @@ object VpnLogRepository {
     private val _deleteCleanupPending = MutableStateFlow(false)
     val deleteCleanupPending = _deleteCleanupPending.asStateFlow()
 
+    private val _appLanguage = MutableStateFlow("system")
+    val appLanguage = _appLanguage.asStateFlow()
+
     fun initialize(context: Context) {
         if (preferencesLoaded) return
         synchronized(this) {
@@ -136,6 +140,7 @@ object VpnLogRepository {
             _exportLogLines.value = prefs.getInt(KEY_EXPORT_LOG_LINES, 50).toString()
             _isThoroughModDeleteEnabled.value = prefs.getBoolean(KEY_THOROUGH_MOD_DELETE, false)
             _serverRegion.value = prefs.getString(KEY_SERVER_REGION, "auto") ?: "auto"
+            _appLanguage.value = prefs.getString(KEY_APP_LANGUAGE, "system") ?: "system"
             preferencesLoaded = true
         }
     }
@@ -313,6 +318,13 @@ object VpnLogRepository {
     }
 
     fun serverRegionNow(): String = _serverRegion.value
+
+    fun setAppLanguage(context: Context, language: String) {
+        _appLanguage.value = language
+        updatePreference(context) { putString(KEY_APP_LANGUAGE, language) }
+    }
+
+    fun appLanguageNow(): String = _appLanguage.value
 
     fun markDeleteCleanupPending() {
         _deleteCleanupPending.value = true

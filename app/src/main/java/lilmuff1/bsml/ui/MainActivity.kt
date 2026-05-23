@@ -125,7 +125,25 @@ private data class LaunchableAppOption(
     val icon: Bitmap
 )
 
+private fun wrapContextWithLocale(context: Context, languageTag: String): Context {
+    val locale = if (languageTag == "system") {
+        java.util.Locale.getDefault()
+    } else {
+        java.util.Locale.forLanguageTag(languageTag)
+    }
+    java.util.Locale.setDefault(locale)
+    val config = android.content.res.Configuration(context.resources.configuration)
+    config.setLocale(locale)
+    return context.createConfigurationContext(config)
+}
+
 class MainActivity : ComponentActivity() {
+    override fun attachBaseContext(newBase: Context) {
+        val prefs = newBase.getSharedPreferences("bsml_vpn_settings", Context.MODE_PRIVATE)
+        val lang = prefs.getString("app_language", "system") ?: "system"
+        super.attachBaseContext(wrapContextWithLocale(newBase, lang))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         VpnLogRepository.initialize(this)
@@ -1485,6 +1503,38 @@ private fun SettingsDialog(
                     }
                 }
                 SectionTitle(stringResource(R.string.title_misc))
+                val appLanguage by VpnLogRepository.appLanguage.collectAsState()
+                val languages = listOf(
+                    Triple("system", "System Default", "Системный"),
+                    Triple("en", "English", "English"),
+                    Triple("ru", "Русский", "Русский")
+                )
+                languages.forEach { (tag, labelEn, labelRu) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                VpnLogRepository.setAppLanguage(context, tag)
+                                (context as? android.app.Activity)?.recreate()
+                            }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = appLanguage == tag,
+                            onClick = {
+                                VpnLogRepository.setAppLanguage(context, tag)
+                                (context as? android.app.Activity)?.recreate()
+                            }
+                        )
+                        Text(
+                            text = if (appLanguage == "ru") labelRu else labelEn,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(start = 12.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 SettingsSwitchRow(
                     label = stringResource(R.string.label_reinstall_after_delete_warning),
                     checked = showReinstallWarningAfterDelete,
