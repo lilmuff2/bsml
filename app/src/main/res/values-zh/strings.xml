@@ -1,0 +1,117 @@
+<resources>
+    <string name="app_name">BSML</string>
+    <string name="status_vpn_permission_denied">未授予 VPN 权限</string>
+    <string name="log_vpn_permission_denied" translatable="false">VPN permission denied by user</string>
+    <string name="label_auto_disable_vpn">自动关闭 VPN</string>
+    <string name="hint_auto_disable_vpn">安装完成后，应用会关闭代理。游戏可能显示连接错误，这是正常现象。</string>
+    <string name="label_install_result_notifications">安装结果通知</string>
+    <string name="label_reinstall_after_delete_warning">删除后安装模组前提醒</string>
+    <string name="label_thorough_mod_delete">更彻底地删除模组</string>
+    <string name="hint_thorough_mod_delete">可能需要更长时间。</string>
+    <string name="label_auto_prepare_files">自动准备文件</string>
+    <string name="label_auto_prepare_files_delay_seconds">自动准备延迟，秒</string>
+    <string name="label_export_log_lines">导出日志行数</string>
+    <string name="label_app_language">语言</string>
+    <string name="title_select_language">选择语言</string>
+    <string name="language_system">跟随系统</string>
+    <string name="language_english">English</string>
+    <string name="language_russian">Русский</string>
+    <string name="language_chinese">中文</string>
+    <string name="label_auto_launch_app">自动启动应用</string>
+    <string name="option_no_auto_launch">不自动启动</string>
+    <string name="label_ip_filter">IP 过滤</string>
+    <string name="label_ip_hosts">IP/主机</string>
+    <string name="label_package_names">应用包名</string>
+    <string name="label_port">端口</string>
+    <string name="hint_array_separator">用逗号、空格或换行分隔</string>
+    <string name="button_install_mod">安装</string>
+    <string name="button_enable_mod">启用</string>
+    <string name="button_disable_mod">关闭</string>
+    <string name="button_fetch_latest_fingerprint">获取最新 fingerprint</string>
+    <string name="button_refresh_mod_files">刷新文件</string>
+    <string name="button_remove_mod">删除</string>
+    <string name="button_stop">停止</string>
+    <string name="button_settings">设置</string>
+    <string name="button_done">完成</string>
+    <string name="button_cancel">取消</string>
+    <string name="button_continue">继续</string>
+    <string name="button_select_mod_folder">选择模组</string>
+    <string name="button_clear_mod_folder">清除模组</string>
+    <string name="button_import_mod">导入模组</string>
+    <string name="button_clear">清除</string>
+    <string name="button_select_original_assets_folder">选择来源</string>
+    <string name="button_export_logs">导出 BSMLLocalVpn 日志</string>
+    <string name="label_mod_folder">模组</string>
+    <string name="label_original_assets_folder">原始文件文件夹</string>
+    <string name="title_original_assets">原始文件</string>
+    <string name="title_settings">设置</string>
+    <string name="title_guidance">说明</string>
+    <string name="title_actions">操作</string>
+    <string name="title_behavior">行为</string>
+    <string name="title_auto_launch">自动启动</string>
+    <string name="title_fingerprint">Fingerprint</string>
+    <string name="title_language">语言</string>
+    <string name="title_author_links">作者</string>
+    <string name="title_features">功能</string>
+    <string name="title_manual_launch_needed">请手动启动游戏</string>
+    <string name="title_reinstall_after_delete_warning">游戏会重新下载所有文件</string>
+    <string name="title_delete_imported_mod_confirm">删除模组？</string>
+    <string name="guidance_step_select_mod">导入模组并等待文件准备完成</string>
+    <string name="guidance_step_action">点击安装或删除模组</string>
+    <string name="guidance_step_auto_launch">游戏会自动启动。请等待进入菜单。大型模组可能需要较长时间</string>
+    <string name="guidance_step_manual_launch">手动打开游戏并等待进入菜单。大型模组可能需要较长时间</string>
+    <string name="guidance_step_cleanup_on_problem">如果出现问题，请点击底部的删除按钮清除所有模组</string>
+    <string name="message_manual_launch_install">现在需要手动进入游戏并等待进入菜单。如果模组很大，加载时间可能明显更久。</string>
+    <string name="message_manual_launch_remove">现在需要手动进入游戏并等待进入菜单，以完成模组删除。如果模组很大，加载时间可能明显更久。</string>
+    <string name="message_reinstall_after_delete_warning">你刚刚删除了模组，但还没有重启游戏。如果现在开始安装，游戏会从头下载所有文件，可能需要很长时间。建议先在不开 VPN 的情况下启动游戏并等待加载完成，然后再开启 VPN 并开始安装。</string>
+    <string name="message_delete_imported_mod_confirm">导入的模组和已准备的文件将被清除。</string>
+    <string name="message_restart_game_to_remove_mods">需要重启游戏才能删除模组</string>
+    <string name="message_refresh_files_before_install">请返回模组加载器并刷新文件</string>
+    <string name="label_latest_fingerprint">最新 fingerprint</string>
+    <string name="label_latest_game_server">最新游戏服务器</string>
+    <string name="value_mod_folder_not_selected">未选择</string>
+    <string name="value_latest_fingerprint_not_loaded">未获取</string>
+    <string name="value_latest_game_server_not_loaded">未保存</string>
+    <string name="status_mod_preparing">正在准备文件</string>
+    <string name="status_mod_ready">文件已准备：</string>
+    <string name="status_mod_empty">模组中没有文件</string>
+    <string name="status_mod_not_prepared">文件尚未准备</string>
+    <string name="status_mod_error_prefix">准备错误：</string>
+    <string name="prepare_stage_scanning">正在扫描文件</string>
+    <string name="prepare_stage_hashing">正在计算哈希</string>
+    <string name="prepare_stage_archive">正在读取归档</string>
+    <string name="prepare_stage_csv">正在修补 CSV</string>
+    <string name="prepare_stage_original_assets">正在准备源文件</string>
+    <string name="prepare_stage_saving">正在保存索引</string>
+    <string name="status_fingerprint_required_for_prepare">请先获取 fingerprint</string>
+    <string name="status_auto_launch_apps_not_found">设备上未找到适合自动启动的应用</string>
+    <string name="status_latest_fingerprint_error_prefix">Fingerprint 错误：%1$s</string>
+    <string name="toast_invalid_mod_archive">所选文件不是有效的 nbassets 模组</string>
+    <string name="toast_feature_conflict">%1$s 与 %2$s 冲突</string>
+    <string name="toast_mod_imported_from_file">模组已导入</string>
+    <string name="toast_mod_unverified_signature">未验证的模组，可能无法工作：归档没有正确签名</string>
+    <string name="warning_mod_unverified_signature">未验证的模组，可能无法工作</string>
+    <string name="warning_mod_old_game_version">模组适用于旧版本游戏（%1$d），当前版本：%2$d</string>
+    <string name="option_no_feature">无</string>
+    <string name="label_author_telegram" translatable="false">Telegram</string>
+    <string name="label_author_discord" translatable="false">Discord</string>
+    <string name="label_author_github" translatable="false">GitHub</string>
+    <string name="label_author_website">网站</string>
+    <string name="fetch_latest_stage_connect">正在连接服务器</string>
+    <string name="fetch_latest_stage_request">Fingerprint 请求：%1$s</string>
+    <string name="fetch_latest_stage_wait">等待 LOGIN_FAILED</string>
+    <string name="fetch_latest_stage_unpack">正在解包 fingerprint</string>
+    <string name="fetch_latest_stage_save">正在保存 fingerprint</string>
+    <string name="fetch_latest_done">Fingerprint 已保存：%1$s</string>
+    <string name="fetch_latest_error_unknown">无法获取 fingerprint</string>
+    <string name="log_fetch_latest_started" translatable="false">SC latest fingerprint fetch started</string>
+    <string name="notification_asset_proxy_title" translatable="false">BSML Asset Proxy</string>
+    <string name="notification_asset_proxy_text" translatable="false">Proxying game assets</string>
+    <string name="notification_vpn_text" translatable="false">TCP proxy is starting</string>
+    <string name="notification_install_result_channel">模组安装结果</string>
+    <string name="notification_install_result_title">模组已安装</string>
+    <string name="notification_install_result_text">已应用 %1$d/%2$d 个文件</string>
+    <string name="notification_install_result_big_text">已应用 %1$d/%2$d 个文件。如果某些更改没有生效，请重启游戏。</string>
+    <string name="notification_install_result_already_applied_title">模组已安装</string>
+    <string name="notification_install_result_already_applied_text">游戏没有请求新文件，无需重新下载</string>
+</resources>

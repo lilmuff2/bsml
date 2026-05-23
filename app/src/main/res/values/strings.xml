@@ -11,6 +11,12 @@
     <string name="label_auto_prepare_files">Auto-prepare files</string>
     <string name="label_auto_prepare_files_delay_seconds">Auto-prepare delay, sec</string>
     <string name="label_export_log_lines">Log lines to export</string>
+    <string name="label_app_language">Language</string>
+    <string name="title_select_language">Select language</string>
+    <string name="language_system">System Default</string>
+    <string name="language_english">English</string>
+    <string name="language_russian">Русский</string>
+    <string name="language_chinese">中文</string>
     <string name="label_auto_launch_app">Application for auto-launch</string>
     <string name="option_no_auto_launch">No auto-launch</string>
     <string name="label_ip_filter">IP filter</string>
@@ -44,7 +50,7 @@
     <string name="title_behavior">Behavior</string>
     <string name="title_auto_launch">Auto-launch</string>
     <string name="title_fingerprint">Fingerprint</string>
-    <string name="title_misc">Misc</string>
+    <string name="title_language">Language</string>
     <string name="title_author_links">Author</string>
     <string name="title_features">Features</string>
     <string name="title_manual_launch_needed">Launch game manually</string>
@@ -71,6 +77,12 @@
     <string name="status_mod_empty">No files in the mod</string>
     <string name="status_mod_not_prepared">Files not prepared yet</string>
     <string name="status_mod_error_prefix">Preparation error:</string>
+    <string name="prepare_stage_scanning">Scanning files</string>
+    <string name="prepare_stage_hashing">Hashing files</string>
+    <string name="prepare_stage_archive">Reading archive</string>
+    <string name="prepare_stage_csv">Patching CSV</string>
+    <string name="prepare_stage_original_assets">Preparing source files</string>
+    <string name="prepare_stage_saving">Saving index</string>
     <string name="status_fingerprint_required_for_prepare">Get fingerprint first</string>
     <string name="status_auto_launch_apps_not_found">Suitable applications for auto-launch were not found on the device</string>
     <string name="status_latest_fingerprint_error_prefix">Fingerprint error: %1$s</string>

@@ -14,7 +14,8 @@ import org.json.JSONObject
 
 class NbAssetsCompiler(
     private val context: Context,
-    private val enabledFeatureIds: Set<String> = emptySet()
+    private val enabledFeatureIds: Set<String> = emptySet(),
+    private val onStage: (stage: String, done: Int, total: Int) -> Unit = { _, _, _ -> }
 ) {
     companion object {
         private const val LAST_MERGED_PATCH_JSON_FILE = "last_nbassets_patch.json"
@@ -31,6 +32,7 @@ class NbAssetsCompiler(
 
     fun compile(archive: File, outputDir: File, clearOutput: Boolean = true): List<PreparedModFile> {
         val startedAt = System.nanoTime()
+        onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_ARCHIVE, 0, 0)
         VpnLogRepository.log("NBASSETS prepare start file=${archive.name} clearOutput=$clearOutput")
         if (clearOutput && outputDir.exists()) outputDir.deleteRecursively()
         outputDir.mkdirs()
@@ -61,7 +63,11 @@ class NbAssetsCompiler(
             }
         }
 
-        listArchiveFiles(archive).forEach { path ->
+        val archiveFiles = listArchiveFiles(archive)
+        var scannedFiles = 0
+        archiveFiles.forEach { path ->
+            scannedFiles++
+            onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_ARCHIVE, scannedFiles, archiveFiles.size)
             val assetPath = archiveAssetPath(path, roots.toList(), allPatchFiles, inactiveFeatureRoots) ?: return@forEach
             prepared[assetPath] = if (archive.isDirectory) {
                 val sourceFile = File(archive, path)
@@ -96,12 +102,14 @@ class NbAssetsCompiler(
         lastMergedPatchJson = mergedPatchJson
         lastMergedPatchJsonFile(context).writeText(mergedPatchJson)
         VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size} file=${archive.name}")
-        patchJson.keysList()
+        val tableNames = patchJson.keysList().sorted()
+        tableNames
             .sorted()
-            .forEach { tableName ->
+            .forEachIndexed { tableIndex, tableName ->
+                onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex, tableNames.size)
                 val tableStartedAt = System.nanoTime()
                 runCatching {
-                    val patch = patchJson.optJSONObject(tableName) ?: return@forEach
+                    val patch = patchJson.optJSONObject(tableName) ?: return@forEachIndexed
                     val original = provider.resolveCsv(tableName)
                     val table = CsvTable.load(original.bytes)
                     val resolvedPatch = CsvPatchApplier.resolveWildcards(patch, table)
@@ -117,6 +125,7 @@ class NbAssetsCompiler(
                         lastModified = output.lastModified()
                     )
                     csvCount++
+                    onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex + 1, tableNames.size)
                     VpnLogRepository.log("NBASSETS csv table=$tableName path=${original.path} ms=${elapsedMs(tableStartedAt)}")
                 }.getOrElse { error ->
                     VpnLogRepository.log(

@@ -27,6 +27,7 @@ data class CleanupReasonSpec(
 object VpnLogRepository {
     private const val TAG = "BSMLLocalVpn"
     private const val MAX_LOGS = 200
+    private const val ORIGINAL_GAME_PACKAGE = "com.supercell.brawlstars"
     private const val PREFS_NAME = "bsml_vpn_settings"
     private const val KEY_AUTO_VPN_DISABLE = "auto_vpn_disable"
     private const val KEY_AUTO_LAUNCH_GAME = "auto_launch_game"
@@ -126,7 +127,16 @@ object VpnLogRepository {
             _isIpFilterEnabled.value = prefs.getBoolean(KEY_IP_FILTER_ENABLED, true)
             _ipFilterText.value = prefs.getString(KEY_IP_FILTER_TEXT, DEFAULT_CAPTURE_TARGETS) ?: DEFAULT_CAPTURE_TARGETS
             _packageText.value = prefs.getString(KEY_PACKAGE_TEXT, DEFAULT_CAPTURE_PACKAGES) ?: DEFAULT_CAPTURE_PACKAGES
-            _autoLaunchPackage.value = prefs.getString(KEY_AUTO_LAUNCH_PACKAGE, null)?.trim()?.ifEmpty { null }
+            val savedAutoLaunchPackage = prefs.getString(KEY_AUTO_LAUNCH_PACKAGE, null)?.trim()?.ifEmpty { null }
+            val defaultAutoLaunchPackage = if (!prefs.contains(KEY_AUTO_LAUNCH_PACKAGE) && isPackageLaunchable(context, ORIGINAL_GAME_PACKAGE)) {
+                ORIGINAL_GAME_PACKAGE
+            } else {
+                savedAutoLaunchPackage
+            }
+            _autoLaunchPackage.value = defaultAutoLaunchPackage
+            if (defaultAutoLaunchPackage != savedAutoLaunchPackage) {
+                prefs.edit().putString(KEY_AUTO_LAUNCH_PACKAGE, defaultAutoLaunchPackage).apply()
+            }
             _portText.value = prefs.getString(KEY_PORT_TEXT, GAME_PORT.toString())
                 ?.filter { it.isDigit() }
                 ?.take(5)
@@ -325,6 +335,10 @@ object VpnLogRepository {
     }
 
     fun appLanguageNow(): String = _appLanguage.value
+
+    private fun isPackageLaunchable(context: Context, packageName: String): Boolean {
+        return context.packageManager.getLaunchIntentForPackage(packageName) != null
+    }
 
     fun markDeleteCleanupPending() {
         _deleteCleanupPending.value = true

@@ -40,6 +40,7 @@ data class PreparedModFile(
 data class ModPreparationState(
     val folderName: String? = null,
     val isPreparing: Boolean = false,
+    val stage: String? = null,
     val preparedCount: Int = 0,
     val totalCount: Int = 0,
     val isReady: Boolean = false,
@@ -50,6 +51,13 @@ data class ModPreparationState(
 }
 
 object ModFilesRepository {
+    const val STAGE_SCANNING = "scanning"
+    const val STAGE_HASHING = "hashing"
+    const val STAGE_ARCHIVE = "archive"
+    const val STAGE_CSV = "csv"
+    const val STAGE_ORIGINAL_ASSETS = "original_assets"
+    const val STAGE_SAVING = "saving"
+
     private const val PREFS_NAME = "mod_files_repository"
     private const val KEY_TREE_URI = "tree_uri"
     private const val PREPARED_INDEX_FILE = "prepared_mod_index.json"
@@ -143,6 +151,10 @@ object ModFilesRepository {
                 VpnLogRepository.log("PREPARE mode=original-assets-only importedModsPresent=true enabledMods=0")
                 return@withContext prepareOriginalAssetsOnly(context)
             }
+            if (OriginalAssetsRepository.state.value.folderName != null) {
+                VpnLogRepository.log("PREPARE mode=original-assets-only importedModsPresent=false enabledMods=0")
+                return@withContext prepareOriginalAssetsOnly(context)
+            }
 
             val folderName = getDisplayName(context)
             if (folderName == null) {
@@ -154,6 +166,7 @@ object ModFilesRepository {
             _preparation.value = ModPreparationState(
                 folderName = folderName,
                 isPreparing = true,
+                stage = STAGE_SCANNING,
                 preparedCount = 0,
                 totalCount = 0,
                 isReady = false,
@@ -179,6 +192,7 @@ object ModFilesRepository {
             _preparation.value = ModPreparationState(
                 folderName = folderName,
                 isPreparing = true,
+                stage = STAGE_HASHING,
                 preparedCount = 0,
                 totalCount = sourceFiles.size,
                 isReady = false,
@@ -203,6 +217,7 @@ object ModFilesRepository {
                         _preparation.value = ModPreparationState(
                             folderName = folderName,
                             isPreparing = true,
+                            stage = STAGE_HASHING,
                             preparedCount = completed,
                             totalCount = sourceFiles.size,
                             isReady = false,
@@ -237,6 +252,15 @@ object ModFilesRepository {
             }
 
             writePreparedIndex(context, preparedFiles.filterNotNull())
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = true,
+                stage = STAGE_SAVING,
+                preparedCount = preparedFiles.size,
+                totalCount = preparedFiles.size,
+                isReady = false,
+                error = null
+            )
             _preparation.value = ModPreparationState(
                 folderName = folderName,
                 isPreparing = false,
@@ -352,6 +376,7 @@ object ModFilesRepository {
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = true,
+            stage = STAGE_ARCHIVE,
             preparedCount = 0,
             totalCount = 0,
             isReady = false,
@@ -381,7 +406,18 @@ object ModFilesRepository {
                 val beforeKeys = preparedMap.keys.toSet()
                 val prepared = NbAssetsCompiler(
                     context = context,
-                    enabledFeatureIds = currentImported.featureSelection.enabledFeatureIds
+                    enabledFeatureIds = currentImported.featureSelection.enabledFeatureIds,
+                    onStage = { stage, done, total ->
+                        _preparation.value = ModPreparationState(
+                            folderName = folderName,
+                            isPreparing = true,
+                            stage = stage,
+                            preparedCount = done,
+                            totalCount = total,
+                            isReady = false,
+                            error = null
+                        )
+                    }
                 ).compile(
                     archive = archive,
                     outputDir = outputDir,
@@ -403,6 +439,15 @@ object ModFilesRepository {
                 )
             }
             val prepared = preparedMap.values.sortedBy { it.path }
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = true,
+                stage = STAGE_SAVING,
+                preparedCount = prepared.size,
+                totalCount = prepared.size,
+                isReady = false,
+                error = null
+            )
             writePreparedIndex(context, prepared)
             _preparation.value = ModPreparationState(
                 folderName = folderName,
@@ -446,6 +491,7 @@ object ModFilesRepository {
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = true,
+            stage = STAGE_ORIGINAL_ASSETS,
             preparedCount = 0,
             totalCount = sourceFiles.size,
             isReady = false,
@@ -463,6 +509,7 @@ object ModFilesRepository {
                     _preparation.value = ModPreparationState(
                         folderName = folderName,
                         isPreparing = true,
+                        stage = STAGE_ORIGINAL_ASSETS,
                         preparedCount = completed,
                         totalCount = sourceFiles.size,
                         isReady = false,
@@ -497,6 +544,7 @@ object ModFilesRepository {
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = true,
+            stage = STAGE_ORIGINAL_ASSETS,
             preparedCount = 0,
             totalCount = 0,
             isReady = false,
@@ -526,6 +574,7 @@ object ModFilesRepository {
                     _preparation.value = ModPreparationState(
                         folderName = folderName,
                         isPreparing = true,
+                        stage = STAGE_ORIGINAL_ASSETS,
                         preparedCount = completed,
                         totalCount = sourceFiles.size,
                         isReady = false,

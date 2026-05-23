@@ -1,3 +1,5 @@
+[English version](README_EN.md)
+
 # BSML (Brawl Stars Mod Loader) 🚀
 
 <p align="center">

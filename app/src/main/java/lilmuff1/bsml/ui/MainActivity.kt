@@ -16,6 +16,7 @@ import android.content.pm.PackageManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -58,9 +59,12 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.IconButton
@@ -125,9 +129,17 @@ private data class LaunchableAppOption(
     val icon: Bitmap
 )
 
+private const val ORIGINAL_GAME_PACKAGE = "com.supercell.brawlstars"
+
 private fun wrapContextWithLocale(context: Context, languageTag: String): Context {
     val locale = if (languageTag == "system") {
-        java.util.Locale.getDefault()
+        val systemConfig = android.content.res.Resources.getSystem().configuration
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            systemConfig.locales.get(0)
+        } else {
+            @Suppress("DEPRECATION")
+            systemConfig.locale
+        }
     } else {
         java.util.Locale.forLanguageTag(languageTag)
     }
@@ -224,6 +236,24 @@ private fun MainScreen() {
     val readyLabel = stringResource(R.string.status_mod_ready)
     val emptyLabel = stringResource(R.string.status_mod_not_prepared)
     val errorPrefix = stringResource(R.string.status_mod_error_prefix)
+    val preparationStageLabel = when (preparation.stage) {
+        ModFilesRepository.STAGE_SCANNING -> stringResource(R.string.prepare_stage_scanning)
+        ModFilesRepository.STAGE_HASHING -> stringResource(R.string.prepare_stage_hashing)
+        ModFilesRepository.STAGE_ARCHIVE -> stringResource(R.string.prepare_stage_archive)
+        ModFilesRepository.STAGE_CSV -> stringResource(R.string.prepare_stage_csv)
+        ModFilesRepository.STAGE_ORIGINAL_ASSETS -> stringResource(R.string.prepare_stage_original_assets)
+        ModFilesRepository.STAGE_SAVING -> stringResource(R.string.prepare_stage_saving)
+        else -> preparingLabel
+    }
+    val preparationStatusText = if (preparation.isPreparing) {
+        if (preparation.totalCount > 0) {
+            "$preparationStageLabel ${preparation.preparedCount}/${preparation.totalCount}"
+        } else {
+            preparationStageLabel
+        }
+    } else {
+        null
+    }
     val fingerprintRequiredStatus = stringResource(R.string.status_fingerprint_required_for_prepare)
     val latestFingerprintLabel = stringResource(R.string.label_latest_fingerprint)
     val latestFingerprintNotLoaded = stringResource(R.string.value_latest_fingerprint_not_loaded)
@@ -233,9 +263,19 @@ private fun MainScreen() {
     val vpnPermissionDeniedLog = stringResource(R.string.log_vpn_permission_denied)
     val featureConflictToast = stringResource(R.string.toast_feature_conflict)
     val invalidModArchiveToast = stringResource(R.string.toast_invalid_mod_archive)
-    val selectedModFolderName = preparation.folderName
-    val isInstallEnabled = !isRunning && selectedModFolderName != null && preparation.isReady && !preparation.isPreparing
-    val modContentAlpha = if (selectedModFolderName != null && !importedModState.isEnabled) 0.48f else 1f
+    val hasImportedMods = importedModState.mods.isNotEmpty()
+    val directModFolderName = if (!hasImportedMods) {
+        ModFilesRepository.getDisplayName(context) ?: ModFilesRepository.getTreeUri(context)?.lastPathSegment
+    } else {
+        null
+    }
+    val hasOriginalAssetsFolder = originalAssetsState.folderName != null
+    val selectedModFolderName = preparation.folderName ?: directModFolderName
+    val hasDirectModFolder = !hasImportedMods && selectedModFolderName != null
+    val canPrepareModFiles = hasImportedMods || hasDirectModFolder || hasOriginalAssetsFolder
+    val isInstallEnabled = !isRunning &&
+        !preparation.isPreparing &&
+        preparation.isReady
     val importedIconBitmap = remember(importedModState.fileName, importedModState.metadata, importedModState.iconLastModified) {
         ImportedModRepository.activeIconFile(context)
             .takeIf { it.isFile }
@@ -261,12 +301,14 @@ private fun MainScreen() {
         isAutoPrepareFilesEnabled,
         autoPrepareFilesDelaySeconds,
         latestFingerprintState.savedRootSha,
+        canPrepareModFiles,
+        hasDirectModFolder,
         isRunning
     ) {
         if (
-            autoPrepareRequestId > 0 &&
+            (autoPrepareRequestId > 0 || hasDirectModFolder) &&
             isAutoPrepareFilesEnabled &&
-            importedModState.mods.isNotEmpty() &&
+            canPrepareModFiles &&
             latestFingerprintState.savedRootSha != null &&
             !isRunning
         ) {
@@ -358,8 +400,24 @@ private fun MainScreen() {
         }
     }
 
+    fun requestInstallStart() {
+        if (
+            VpnLogRepository.isDeleteCleanupPendingNow() &&
+            VpnLogRepository.shouldShowReinstallWarningAfterDeleteNow()
+        ) {
+            showReinstallAfterDeleteWarning = true
+        } else if (VpnLogRepository.captureSettingsNow().autoLaunchPackage == null) {
+            pendingManualLaunchHint = PendingManualLaunchHint(
+                cleanupMode = false,
+                cleanupReason = null
+            )
+        } else {
+            requestStart(cleanupMode = false, cleanupReason = null)
+        }
+    }
+
     if (showSettings) {
-        SettingsDialog(
+        SettingsScreen(
             isRunning = isRunning,
             isAutoVpnDisableEnabled = isAutoVpnDisableEnabled,
             isInstallResultNotificationsEnabled = isInstallResultNotificationsEnabled,
@@ -416,6 +474,7 @@ private fun MainScreen() {
                 }
             }
         )
+        return
     }
 
     pendingManualLaunchHint?.let { hint ->
@@ -597,7 +656,7 @@ private fun MainScreen() {
                             Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
                         }
 
-                        if (importedModState.mods.isNotEmpty()) {
+                        if (canPrepareModFiles) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -605,7 +664,7 @@ private fun MainScreen() {
                             ) {
                                 Text(
                                     text = if (preparation.isPreparing) {
-                                        preparingLabel
+                                        preparationStatusText ?: preparingLabel
                                     } else {
                                         when {
                                             preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
@@ -638,6 +697,16 @@ private fun MainScreen() {
                                     CleanIndeterminateProgressIndicator(modifier = Modifier.fillMaxWidth())
                                 }
                             }
+                            if (hasDirectModFolder) {
+                                Text(
+                                    text = selectedModFolderName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (hasImportedMods) {
                             importedModState.mods.forEach { mod ->
                                 ImportedModListCard(
                                     context = context,
@@ -736,24 +805,18 @@ private fun MainScreen() {
                                 )
                             }
                             Button(
-                                enabled = isRunning || (isInstallEnabled && !preparation.isPreparing),
+                                enabled = isRunning || isInstallEnabled,
                                 onClick = {
                                     if (isRunning) {
                                         stopMonitoring(context)
-                                    } else {
-                                        if (
-                                            VpnLogRepository.isDeleteCleanupPendingNow() &&
-                                            VpnLogRepository.shouldShowReinstallWarningAfterDeleteNow()
-                                        ) {
-                                            showReinstallAfterDeleteWarning = true
-                                        } else if (VpnLogRepository.captureSettingsNow().autoLaunchPackage == null) {
-                                            pendingManualLaunchHint = PendingManualLaunchHint(
-                                                cleanupMode = false,
-                                                cleanupReason = null
-                                            )
-                                        } else {
-                                            requestStart(cleanupMode = false, cleanupReason = null)
+                                    } else if (!preparation.isReady && hasDirectModFolder) {
+                                        scope.launch {
+                                            if (ModFilesRepository.prepareFiles(context)) {
+                                                requestInstallStart()
+                                            }
                                         }
+                                    } else {
+                                        requestInstallStart()
                                     }
                                 },
                                 modifier = Modifier
@@ -1319,7 +1382,7 @@ private fun ImportedModListCard(
 }
 
 @Composable
-private fun SettingsDialog(
+private fun SettingsScreen(
     isRunning: Boolean,
     isAutoVpnDisableEnabled: Boolean,
     isInstallResultNotificationsEnabled: Boolean,
@@ -1352,283 +1415,373 @@ private fun SettingsDialog(
     onFetchLatest: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.button_done))
-            }
-        },
-        title = {
-            Text(stringResource(R.string.title_settings))
-        },
-        text = {
+    val scope = rememberCoroutineScope()
+    val appLanguage by VpnLogRepository.appLanguage.collectAsState()
+    var languageDropdownExpanded by remember { mutableStateOf(false) }
+    val languages = listOf(
+        "system" to R.string.language_system,
+        "en" to R.string.language_english,
+        "ru" to R.string.language_russian,
+        "zh" to R.string.language_chinese
+    )
+    val selectedLanguage = languages.firstOrNull { it.first == appLanguage } ?: languages.first()
+    val selectedLanguageLabel = stringResource(selectedLanguage.second)
+    fun setAutoLaunchPackageAndRefreshIfNeeded(packageName: String?) {
+        val shouldRefreshFingerprint = packageName != autoLaunchPackage
+        VpnLogRepository.setAutoLaunchPackage(context, packageName)
+        if (shouldRefreshFingerprint) {
+            scope.launch { LatestFingerprintRepository.fetchLatest(context) }
+        }
+    }
+
+    BackHandler(onBack = onDismiss)
+
+    Scaffold(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        containerColor = MaterialTheme.colorScheme.background
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(innerPadding)
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+        ) {
             Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                SectionTitle(stringResource(R.string.title_behavior))
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_install_result_notifications),
-                    checked = isInstallResultNotificationsEnabled,
-                    onCheckedChange = onInstallResultNotificationsChange
-                )
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_auto_disable_vpn),
-                    checked = isAutoVpnDisableEnabled,
-                    onCheckedChange = { VpnLogRepository.setAutoVpnDisableEnabled(context, it) }
-                )
-                Text(
-                    text = stringResource(R.string.hint_auto_disable_vpn),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                SectionTitle(stringResource(R.string.title_auto_launch))
-                if (launchableApps.isNotEmpty()) {
-                    Text(
-                        text = stringResource(R.string.label_auto_launch_app),
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                VpnLogRepository.setAutoLaunchPackage(context, null)
-                            }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = autoLaunchPackage == null,
-                            onClick = { VpnLogRepository.setAutoLaunchPackage(context, null) }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = stringResource(R.string.button_done),
+                            modifier = Modifier.size(28.dp)
                         )
-                        Column(
-                            modifier = Modifier.padding(start = 12.dp)
-                        ) {
-                            Text(
-                                text = stringResource(R.string.option_no_auto_launch),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
                     }
-                    launchableApps.forEach { app ->
+                    Text(
+                        text = stringResource(R.string.title_settings),
+                        modifier = Modifier.padding(start = 8.dp),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_install_result_notifications),
+                        checked = isInstallResultNotificationsEnabled,
+                        onCheckedChange = onInstallResultNotificationsChange
+                    )
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_auto_disable_vpn),
+                        checked = isAutoVpnDisableEnabled,
+                        onCheckedChange = { VpnLogRepository.setAutoVpnDisableEnabled(context, it) }
+                    )
+                    Text(
+                        text = stringResource(R.string.hint_auto_disable_vpn),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_reinstall_after_delete_warning),
+                        checked = showReinstallWarningAfterDelete,
+                        onCheckedChange = onShowReinstallWarningAfterDeleteChange
+                    )
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_thorough_mod_delete),
+                        checked = isThoroughModDeleteEnabled,
+                        onCheckedChange = onThoroughModDeleteChange,
+                        enabled = !isRunning
+                    )
+                    Text(
+                        text = stringResource(R.string.hint_thorough_mod_delete),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SectionTitle(stringResource(R.string.label_auto_launch_app))
+                    if (launchableApps.isNotEmpty()) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    VpnLogRepository.setAutoLaunchPackage(context, app.packageName)
+                                    setAutoLaunchPackageAndRefreshIfNeeded(null)
                                 }
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            RadioButton(
-                                selected = autoLaunchPackage == app.packageName,
-                                onClick = { VpnLogRepository.setAutoLaunchPackage(context, app.packageName) }
-                            )
-                            Image(
-                                bitmap = app.icon.asImageBitmap(),
-                                contentDescription = app.label,
-                                modifier = Modifier
-                                    .padding(start = 4.dp)
-                                    .width(28.dp)
-                                    .height(28.dp)
-                            )
+	                            RadioButton(
+	                                selected = autoLaunchPackage == null,
+	                                onClick = { setAutoLaunchPackageAndRefreshIfNeeded(null) }
+	                            )
                             Column(
                                 modifier = Modifier.padding(start = 12.dp)
                             ) {
-                                Text(app.label, style = MaterialTheme.typography.bodyMedium)
-                                Text(app.packageName, style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    text = stringResource(R.string.option_no_auto_launch),
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                            }
+                        }
+                        launchableApps.forEach { app ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+	                                .clip(RoundedCornerShape(12.dp))
+	                                .clickable {
+	                                        setAutoLaunchPackageAndRefreshIfNeeded(app.packageName)
+	                                    }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+	                                RadioButton(
+	                                    selected = autoLaunchPackage == app.packageName,
+	                                    onClick = { setAutoLaunchPackageAndRefreshIfNeeded(app.packageName) }
+	                                )
+                                Image(
+                                    bitmap = app.icon.asImageBitmap(),
+                                    contentDescription = app.label,
+                                    modifier = Modifier
+                                        .padding(start = 4.dp)
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                )
+                                Column(
+                                    modifier = Modifier.padding(start = 12.dp)
+                                ) {
+                                    Text(app.label, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        app.packageName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = stringResource(R.string.status_auto_launch_apps_not_found),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SectionTitle("VPN")
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_ip_filter),
+                        checked = isIpFilterEnabled,
+                        onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
+                        enabled = !isRunning
+                    )
+                    if (isIpFilterEnabled) {
+                        ArrayTextField(
+                            value = ipFilterText,
+                            onValueChange = { VpnLogRepository.setIpFilterText(context, it) },
+                            enabled = !isRunning,
+                            label = stringResource(R.string.label_ip_hosts)
+                        )
+                    } else {
+                        ArrayTextField(
+                            value = packageText,
+                            onValueChange = { VpnLogRepository.setPackageText(context, it) },
+                            enabled = !isRunning,
+                            label = stringResource(R.string.label_package_names)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = portText,
+                        onValueChange = { VpnLogRepository.setPortText(context, it) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isRunning,
+                        label = { Text(stringResource(R.string.label_port)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SectionTitle(stringResource(R.string.title_original_assets))
+                    if (originalAssetsFolderName == null) {
+                        OutlinedButton(
+                            enabled = !isRunning,
+                            onClick = onSelectOriginalAssetsFolder,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.button_select_original_assets_folder))
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+                                .padding(start = 14.dp, top = 4.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = originalAssetsFolderName,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            IconButton(enabled = !isRunning, onClick = onClearOriginalAssetsFolder) {
+                                Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.button_clear))
                             }
                         }
                     }
-                } else {
-                    Text(
-                        text = stringResource(R.string.status_auto_launch_apps_not_found),
-                        style = MaterialTheme.typography.bodySmall
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SectionTitle(stringResource(R.string.title_language))
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { languageDropdownExpanded = true }
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.65f))
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = selectedLanguageLabel,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Icon(
+                                Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = stringResource(R.string.title_select_language),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = languageDropdownExpanded,
+                            onDismissRequest = { languageDropdownExpanded = false }
+                        ) {
+                            languages.forEach { (tag, labelRes) ->
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(labelRes)) },
+                                    trailingIcon = {
+                                        RadioButton(
+                                            selected = appLanguage == tag,
+                                            onClick = null
+                                        )
+                                    },
+                                    onClick = {
+                                        languageDropdownExpanded = false
+                                        VpnLogRepository.setAppLanguage(context, tag)
+                                        (context as? android.app.Activity)?.recreate()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    SettingsSwitchRow(
+                        label = stringResource(R.string.label_auto_prepare_files),
+                        checked = isAutoPrepareFilesEnabled,
+                        onCheckedChange = onAutoPrepareFilesEnabledChange,
+                        enabled = !isRunning
+                    )
+                    OutlinedTextField(
+                        value = autoPrepareFilesDelaySeconds,
+                        onValueChange = onAutoPrepareFilesDelaySecondsChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isRunning && isAutoPrepareFilesEnabled,
+                        label = { Text(stringResource(R.string.label_auto_prepare_files_delay_seconds)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                     )
                 }
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_ip_filter),
-                    checked = isIpFilterEnabled,
-                    onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
-                    enabled = !isRunning
-                )
-                if (isIpFilterEnabled) {
-                    ArrayTextField(
-                        value = ipFilterText,
-                        onValueChange = { VpnLogRepository.setIpFilterText(context, it) },
-                        enabled = !isRunning,
-                        label = stringResource(R.string.label_ip_hosts)
+
+                SectionCard(contentPadding = 16.dp) {
+                    SectionTitle(stringResource(R.string.title_fingerprint))
+                    LabeledValue(
+                        label = latestFingerprintLabel,
+                        value = latestFingerprintState.savedRootSha ?: latestFingerprintNotLoaded
                     )
-                } else {
-                    ArrayTextField(
-                        value = packageText,
-                        onValueChange = { VpnLogRepository.setPackageText(context, it) },
-                        enabled = !isRunning,
-                        label = stringResource(R.string.label_package_names)
+                    LabeledValue(
+                        label = latestGameServerLabel,
+                        value = latestFingerprintState.savedGameServer ?: latestGameServerNotLoaded
                     )
-                }
-                OutlinedTextField(
-                    value = portText,
-                    onValueChange = { VpnLogRepository.setPortText(context, it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isRunning,
-                    label = { Text(stringResource(R.string.label_port)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
-                SectionTitle(stringResource(R.string.title_original_assets))
-                if (originalAssetsFolderName == null) {
+                    when {
+                        latestFingerprintState.isFetching -> {
+                            CleanLinearProgressIndicator(
+                                progress = latestFingerprintState.progress,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                text = latestFingerprintState.message ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        latestFingerprintState.error != null -> {
+                            Text(
+                                text = stringResource(
+                                    R.string.status_latest_fingerprint_error_prefix,
+                                    latestFingerprintState.error ?: ""
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                     OutlinedButton(
-                        enabled = !isRunning,
-                        onClick = onSelectOriginalAssetsFolder,
+                        enabled = !isRunning && !latestFingerprintState.isFetching,
+                        onClick = onFetchLatest,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(stringResource(R.string.button_select_original_assets_folder))
+                        Text(stringResource(R.string.button_fetch_latest_fingerprint))
                     }
-                } else {
+                }
+
+                SectionCard(contentPadding = 16.dp) {
+                    OutlinedButton(
+                        onClick = { exportBsmlLogs(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.button_export_logs))
+                    }
+                    OutlinedTextField(
+                        value = exportLogLines,
+                        onValueChange = onExportLogLinesChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isRunning,
+                        label = { Text(stringResource(R.string.label_export_log_lines)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                        horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        Text(
-                            text = originalAssetsFolderName,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        IconButton(enabled = !isRunning, onClick = onClearOriginalAssetsFolder) {
-                            Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.button_clear))
-                        }
+                        AuthorLinkPainterIcon(painterResource(R.drawable.ic_telegram), stringResource(R.string.label_author_telegram), "https://t.me/lilmuff1")
+                        AuthorLinkPainterIcon(painterResource(R.drawable.ic_discord), stringResource(R.string.label_author_discord), "https://discord.com/users/lilmuff1")
+                        AuthorLinkPainterIcon(painterResource(R.drawable.ic_github), stringResource(R.string.label_author_github), "https://github.com/lilmuff2/bsml")
+                        AuthorLinkIcon(Icons.Rounded.Public, stringResource(R.string.label_author_website), "https://lilmuff1.xyz")
                     }
                 }
-                SectionTitle(stringResource(R.string.title_misc))
-                val appLanguage by VpnLogRepository.appLanguage.collectAsState()
-                val languages = listOf(
-                    Triple("system", "System Default", "Системный"),
-                    Triple("en", "English", "English"),
-                    Triple("ru", "Русский", "Русский")
-                )
-                languages.forEach { (tag, labelEn, labelRu) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                VpnLogRepository.setAppLanguage(context, tag)
-                                (context as? android.app.Activity)?.recreate()
-                            }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = appLanguage == tag,
-                            onClick = {
-                                VpnLogRepository.setAppLanguage(context, tag)
-                                (context as? android.app.Activity)?.recreate()
-                            }
-                        )
-                        Text(
-                            text = if (appLanguage == "ru") labelRu else labelEn,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(start = 12.dp)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_reinstall_after_delete_warning),
-                    checked = showReinstallWarningAfterDelete,
-                    onCheckedChange = onShowReinstallWarningAfterDeleteChange
-                )
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_thorough_mod_delete),
-                    checked = isThoroughModDeleteEnabled,
-                    onCheckedChange = onThoroughModDeleteChange,
-                    enabled = !isRunning
-                )
-                Text(
-                    text = stringResource(R.string.hint_thorough_mod_delete),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_auto_prepare_files),
-                    checked = isAutoPrepareFilesEnabled,
-                    onCheckedChange = onAutoPrepareFilesEnabledChange,
-                    enabled = !isRunning
-                )
-                OutlinedTextField(
-                    value = autoPrepareFilesDelaySeconds,
-                    onValueChange = onAutoPrepareFilesDelaySecondsChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isRunning && isAutoPrepareFilesEnabled,
-                    label = { Text(stringResource(R.string.label_auto_prepare_files_delay_seconds)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
-                OutlinedButton(
-                    onClick = { exportBsmlLogs(context) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(stringResource(R.string.button_export_logs))
-                }
-                OutlinedTextField(
-                    value = exportLogLines,
-                    onValueChange = onExportLogLinesChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isRunning,
-                    label = { Text(stringResource(R.string.label_export_log_lines)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
-                SectionTitle(stringResource(R.string.title_fingerprint))
-                LabeledValue(
-                    label = latestFingerprintLabel,
-                    value = latestFingerprintState.savedRootSha ?: latestFingerprintNotLoaded
-                )
-                LabeledValue(
-                    label = latestGameServerLabel,
-                    value = latestFingerprintState.savedGameServer ?: latestGameServerNotLoaded
-                )
-                when {
-                    latestFingerprintState.isFetching -> {
-                        CleanLinearProgressIndicator(
-                            progress = latestFingerprintState.progress,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            text = latestFingerprintState.message ?: "",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    latestFingerprintState.error != null -> {
-                        Text(
-                            text = stringResource(
-                                R.string.status_latest_fingerprint_error_prefix,
-                                latestFingerprintState.error ?: ""
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-                OutlinedButton(
-                    enabled = !isRunning && !latestFingerprintState.isFetching,
-                    onClick = onFetchLatest,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(stringResource(R.string.button_fetch_latest_fingerprint))
-                }
-                SectionTitle(stringResource(R.string.title_author_links))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_telegram), stringResource(R.string.label_author_telegram), "https://t.me/lilmuff1")
-                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_discord), stringResource(R.string.label_author_discord), "https://discord.com/users/lilmuff1")
-                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_github), stringResource(R.string.label_author_github), "https://github.com/lilmuff2/bsml")
-                    AuthorLinkIcon(Icons.Rounded.Public, stringResource(R.string.label_author_website), "https://lilmuff1.xyz")
-                }
+                Spacer(modifier = Modifier.height(4.dp))
             }
         }
-    )
+    }
 }
 
 @Composable

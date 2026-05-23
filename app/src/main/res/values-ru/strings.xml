@@ -11,6 +11,12 @@
     <string name="label_auto_prepare_files">Авто подготовка файлов</string>
     <string name="label_auto_prepare_files_delay_seconds">Задержка авто подготовки, сек</string>
     <string name="label_export_log_lines">Строк логов для экспорта</string>
+    <string name="label_app_language">Язык</string>
+    <string name="title_select_language">Выбор языка</string>
+    <string name="language_system">Системный</string>
+    <string name="language_english">English</string>
+    <string name="language_russian">Русский</string>
+    <string name="language_chinese">中文</string>
     <string name="label_auto_launch_app">Приложение для автозапуска</string>
     <string name="option_no_auto_launch">Без автозапуска</string>
     <string name="label_ip_filter">Фильтр по IP</string>
@@ -44,7 +50,7 @@
     <string name="title_behavior">Поведение</string>
     <string name="title_auto_launch">Автозапуск</string>
     <string name="title_fingerprint">Fingerprint</string>
-    <string name="title_misc">Прочее</string>
+    <string name="title_language">Язык</string>
     <string name="title_author_links">Автор</string>
     <string name="title_features">Фичи</string>
     <string name="title_manual_launch_needed">Запусти игру вручную</string>
@@ -71,6 +77,12 @@
     <string name="status_mod_empty">В моде нет файлов</string>
     <string name="status_mod_not_prepared">Файлы еще не подготовлены</string>
     <string name="status_mod_error_prefix">Ошибка подготовки:</string>
+    <string name="prepare_stage_scanning">Поиск файлов</string>
+    <string name="prepare_stage_hashing">Подсчет хешей</string>
+    <string name="prepare_stage_archive">Чтение архива</string>
+    <string name="prepare_stage_csv">Патч CSV</string>
+    <string name="prepare_stage_original_assets">Подготовка исходных файлов</string>
+    <string name="prepare_stage_saving">Сохранение индекса</string>
     <string name="status_fingerprint_required_for_prepare">Сначала получи fingerprint</string>
     <string name="status_auto_launch_apps_not_found">Подходящие приложения для автозапуска не найдены на устройстве</string>
     <string name="status_latest_fingerprint_error_prefix">Ошибка fingerprint: %1$s</string>
