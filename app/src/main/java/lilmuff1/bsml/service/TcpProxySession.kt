@@ -20,6 +20,7 @@ interface TcpProxySessionCallbacks {
     fun protectSocket(socket: Socket): Boolean
     fun sendToTun(packet: ByteArray)
     fun removeSession(key: SessionKey)
+    fun resolveRemoteAddress(serverIp: Int, serverPort: Int): InetSocketAddress
     fun shouldRewriteContentHash(): Boolean
     fun onClientHelloContentHashObserved(contentHash: String)
     fun onClientHelloVersionObserved(version: String)
@@ -86,16 +87,16 @@ class TcpProxySession(
 
                 socket.tcpNoDelay = true
                 socket.soTimeout = SOCKET_READ_TIMEOUT_MS
+                val remoteAddress = callbacks.resolveRemoteAddress(key.serverIp, key.serverPort)
                 socket.connect(
-                    InetSocketAddress(intToIpv4(key.serverIp), key.serverPort),
+                    remoteAddress,
                     SOCKET_CONNECT_TIMEOUT_MS
                 )
-                channel.configureBlocking(false)
                 remoteSocket = socket
                 remoteChannel = channel
                 remoteConnected = true
                 debugLog(
-                    "Remote connected ${intToIpv4(key.serverIp)}:${key.serverPort} " +
+                    "Remote connected ${remoteAddress.hostString}:${remoteAddress.port} " +
                         "from ${socket.localAddress.hostAddress}:${socket.localPort}"
                 )
                 startRemoteWriter()
@@ -350,11 +351,8 @@ class TcpProxySession(
                     buffer.clear()
                     val read = channel.read(buffer)
                     if (read < 0) break
-                    if (read == 0) {
-                        Thread.sleep(5)
-                        continue
-                    }
-
+                    if (read == 0) continue
+ 
                     buffer.flip()
                     val chunk = ByteArray(read)
                     buffer.get(chunk)
@@ -509,22 +507,12 @@ class TcpProxySession(
 
     private fun writeFullyToRemote(channel: SocketChannel, payload: ByteArray) {
         val buffer = ByteBuffer.wrap(payload)
-        val deadline = System.currentTimeMillis() + SOCKET_WRITE_TIMEOUT_MS
-        var writtenTotal = 0
-
         while (buffer.hasRemaining() && !closed) {
             val written = channel.write(buffer)
-            if (written > 0) {
-                writtenTotal += written
-                continue
+            if (written <= 0 && buffer.hasRemaining()) {
+                throw IOException("socket channel write returned 0 bytes in blocking mode")
             }
-
-            if (System.currentTimeMillis() > deadline) {
-                throw SocketTimeoutException("remote write timed out after $writtenTotal/${payload.size} bytes")
-            }
-            Thread.sleep(2)
         }
-
         if (closed) {
             throw IOException("session closed during remote write")
         }

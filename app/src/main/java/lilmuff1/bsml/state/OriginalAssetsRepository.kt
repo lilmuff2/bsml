@@ -14,7 +14,9 @@ data class OriginalAssetsState(
 
 data class OriginalAssetFile(
     val path: String,
-    val uri: Uri
+    val uri: Uri,
+    val size: Long,
+    val lastModified: Long
 )
 
 object OriginalAssetsRepository {
@@ -118,7 +120,12 @@ object OriginalAssetsRepository {
             val path = if (prefix.isEmpty()) name else "$prefix/$name"
             when {
                 child.isDirectory -> collectFiles(child, path, result)
-                child.isFile -> result += OriginalAssetFile(path = normalizePath(path), uri = child.uri)
+                child.isFile -> result += OriginalAssetFile(
+                    path = normalizePath(path),
+                    uri = child.uri,
+                    size = child.length(),
+                    lastModified = child.lastModified()
+                )
             }
         }
     }

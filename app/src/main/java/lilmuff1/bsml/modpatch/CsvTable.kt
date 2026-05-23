@@ -1,8 +1,10 @@
 package lilmuff1.bsml.modpatch
 
+import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.DataFormatException
 import org.json.JSONObject
+import org.tukaani.xz.LZMAInputStream
 
 class CsvTable(
     val columns: List<String>,
@@ -10,6 +12,7 @@ class CsvTable(
     val rows: MutableList<MutableList<Any?>>
 ) {
     val names: MutableMap<String, Int> = HashMap()
+    val columnIndexes: Map<String, Int> = columns.withIndex().associate { it.value to it.index }
 
     init {
         require(columns.size == types.size) { "names and types must have the same length" }
@@ -84,7 +87,25 @@ class CsvTable(
                 bytes = bytes.copyOfRange(SIGNATURE_PREFIX_LENGTH, bytes.size)
             }
             if (bytes.isNotEmpty() && bytes[0].toInt() in 90..95) {
-                throw DataFormatException("LZMA CSV is not supported yet")
+                bytes = try {
+                    if (bytes.size <= 9) {
+                        throw DataFormatException("LZMA CSV is too short")
+                    }
+                    val propsByte = bytes[0].toInt() and 0xFF
+                    val dictSize =
+                        (bytes[1].toInt() and 0xFF) or
+                            ((bytes[2].toInt() and 0xFF) shl 8) or
+                            ((bytes[3].toInt() and 0xFF) shl 16) or
+                            ((bytes[4].toInt() and 0xFF) shl 24)
+                    LZMAInputStream(
+                        ByteArrayInputStream(bytes, 9, bytes.size - 9),
+                        -1,
+                        propsByte.toByte(),
+                        dictSize
+                    ).use { it.readBytes() }
+                } catch (error: Throwable) {
+                    throw DataFormatException("Failed to decode LZMA CSV: ${error.message ?: "unknown"}")
+                }
             }
 
             val records = parseRecords(bytes.toString(StandardCharsets.UTF_8))

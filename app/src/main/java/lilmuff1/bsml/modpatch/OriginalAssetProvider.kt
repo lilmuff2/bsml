@@ -6,6 +6,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import lilmuff1.bsml.state.LatestFingerprintRepository
 import lilmuff1.bsml.state.OriginalAssetsRepository
+import lilmuff1.bsml.state.VpnLogRepository
 import org.json.JSONArray
 import org.json.JSONObject
 

@@ -66,7 +66,8 @@ class LoginFailedRewriter(
         reasonCode: Int,
         reasonName: String,
         reasonText: String,
-        forceRewriteFingerprint: Boolean = reasonCode != 1
+        forceRewriteFingerprint: Boolean = reasonCode != 1,
+        thoroughCleanup: Boolean = false
     ): LoginFailedRewriteResult {
         val totalStartedAt = System.nanoTime()
         val prefixStartedAt = System.nanoTime()
@@ -84,16 +85,19 @@ class LoginFailedRewriter(
             return LoginFailedRewriteResult(body, FingerprintHashes(null, null), FingerprintPatchStats(mode = "delete"))
         }
 
-        val localAssetUrl = localAssetBaseUrl()
+        val localAssetUrl = externalAssetBaseUrl()
         val assetOrigins = linkedSetOf<String>()
         var assetUrlRewritten = false
         val shouldRewriteFingerprint = forceRewriteFingerprint
         val tailParseStartedAt = System.nanoTime()
         val parsedTail = LoginFailedTail.parse(parsed.suffix)
         val tailParseMs = elapsedMsLong(tailParseStartedAt)
-        val originalHashes = FingerprintHashes(extractPlainFingerprintRootSha(parsed.fingerprint), null)
+        val originalRootSha = extractPlainFingerprintRootSha(parsed.fingerprint)
+            ?: LatestFingerprintStore.readStoredClientHelloHash(filesDir)
+        val originalHashes = FingerprintHashes(originalRootSha, null)
         val fingerprintStartedAt = System.nanoTime()
-        val cleanupFingerprintJson = if (shouldRewriteFingerprint) createCleanupFingerprintJson() else null
+        val cleanupFingerprint = if (shouldRewriteFingerprint) createCleanupFingerprint(thoroughCleanup) else null
+        val cleanupFingerprintJson = cleanupFingerprint?.json
         var tailRoundTripMs = 0L
         var cleanupDeflateMs = 0L
         var tailEncodeMs = 0L
@@ -179,7 +183,7 @@ class LoginFailedRewriter(
             body = rewrittenBody,
             hashes = hashes,
             patchStats = FingerprintPatchStats(
-                fileShaPatched = if (shouldRewriteFingerprint) 1 else 0,
+                fileShaPatched = if (shouldRewriteFingerprint) cleanupFingerprint?.fileCount ?: 1 else 0,
                 rootShaOld = originalHashes.rootSha,
                 rootShaNew = if (shouldRewriteFingerprint) hashes.rootSha else originalHashes.rootSha,
                 mode = "delete"
@@ -187,7 +191,7 @@ class LoginFailedRewriter(
             assetUrlRewritten = assetUrlRewritten,
             rootShaRewriteApplied = false,
             assetOrigins = assetOrigins.toList(),
-            originalRootSha = originalHashes.rootSha
+            originalRootSha = originalRootSha
         )
     }
 
@@ -218,7 +222,7 @@ class LoginFailedRewriter(
         var patchStats = FingerprintPatchStats()
         var originalRootSha: String? = null
         val shouldPatchFingerprint = true
-        val localAssetUrl = localAssetBaseUrl()
+        val localAssetUrl = externalAssetBaseUrl()
         val assetOrigins = linkedSetOf<String>()
         val plainFingerprintStartedAt = System.nanoTime()
         val rewrittenFingerprint = if (shouldPatchFingerprint) parsed.fingerprint?.takeIf { it.trimStart().startsWith("{") }?.let { fingerprintJson ->
@@ -586,10 +590,69 @@ class LoginFailedRewriter(
     return GeneratedTriggerAsset(sha)
 }
 
-    private fun createCleanupFingerprintJson(): String {
+    private fun createCleanupFingerprint(thoroughCleanup: Boolean): CleanupFingerprint {
+    if (thoroughCleanup) {
+        createThoroughCleanupFingerprint()?.let { return it }
+    }
     val trigger = createGeneratedTriggerAsset()
     val rootSha = PATCH_NAMESPACE + randomShaSuffix()
-    return "{\"files\":[{\"file\":\"$PATCH_NAMESPACE\",\"sha\":\"${trigger.sha}\"}],\"sha\":\"$rootSha\",\"version\":\"0.0.0\"}"
+    return CleanupFingerprint(
+        json = "{\"files\":[{\"file\":\"$PATCH_NAMESPACE\",\"sha\":\"${trigger.sha}\"}],\"sha\":\"$rootSha\",\"version\":\"0.0.0\"}",
+        fileCount = 1
+    )
+}
+
+    private fun createThoroughCleanupFingerprint(): CleanupFingerprint? {
+    return runCatching {
+        val storedFingerprint = File(filesDir, LAST_SERVER_FINGERPRINT_FILE)
+        if (!storedFingerprint.isFile) return@runCatching null
+        val sourceRoot = JSONObject(storedFingerprint.readText())
+        val sourceFiles = sourceRoot.optJSONArray("files") ?: JSONArray()
+        val files = JSONArray()
+        val includedPaths = HashSet<String>()
+        val trigger = createGeneratedTriggerAsset()
+        files.put(JSONObject().put("file", PATCH_NAMESPACE).put("sha", trigger.sha))
+        includedPaths += PATCH_NAMESPACE
+        for (index in 0 until sourceFiles.length()) {
+            val item = sourceFiles.optJSONObject(index) ?: continue
+            val path = item.optString("file", "").replace("\\/", "/").trim()
+            val sha = item.optString("sha", "").trim()
+            if (path.isEmpty() || sha.isEmpty() || !isThoroughCleanupAssetPath(path)) continue
+            files.put(JSONObject().put("file", path).put("sha", sha))
+            includedPaths += path
+        }
+        if (files.length() <= 1) return@runCatching null
+        val rootSha = PATCH_NAMESPACE + randomShaSuffix()
+        VpnLogRepository.log("SC cleanup thorough fingerprint files=${files.length()}")
+        CleanupFingerprint(
+            json = JSONObject()
+                .put("files", files)
+                .put("sha", rootSha)
+                .put("version", "0.0.0")
+                .toString(),
+            fileCount = files.length()
+        )
+    }.getOrElse { error ->
+        VpnLogRepository.log("SC cleanup thorough fingerprint failed ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
+        null
+    }
+}
+
+    private fun isThoroughCleanupAssetPath(path: String): Boolean {
+    val normalized = path.trim().removePrefix("/")
+    val normalizedLower = normalized.lowercase()
+    val pathParts = normalizedLower.split('/')
+    if (hasBackgroundDirectory(pathParts)) return false
+    return when {
+        normalizedLower.startsWith("sc3d/") -> !normalizedLower.endsWith(".png")
+        normalizedLower.startsWith("sfx/") -> true
+        normalizedLower.startsWith("music/") -> true
+        else -> false
+    }
+}
+
+    private fun hasBackgroundDirectory(pathParts: List<String>): Boolean {
+    return pathParts.any { it == "background" }
 }
 
     private fun sha1Hex(bytes: ByteArray): String {
@@ -928,3 +991,10 @@ class LoginFailedRewriter(
 private fun elapsedMsLong(startedAtNanos: Long): Long {
     return (System.nanoTime() - startedAtNanos) / 1_000_000L
 }
+
+private data class CleanupFingerprint(
+    val json: String,
+    val fileCount: Int
+)
+
+private const val LAST_SERVER_FINGERPRINT_FILE = "last_server_fingerprint.json"

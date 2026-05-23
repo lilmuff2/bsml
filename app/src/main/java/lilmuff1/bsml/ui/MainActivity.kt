@@ -52,6 +52,12 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.DoNotDisturbAlt
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -87,11 +93,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.lifecycleScope
 import lilmuff1.bsml.R
 import lilmuff1.bsml.config.DEFAULT_CAPTURE_PACKAGES
 import lilmuff1.bsml.service.AssetProxyService
@@ -127,6 +135,33 @@ class MainActivity : ComponentActivity() {
                 MainScreen()
             }
         }
+        handleIncomingModIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingModIntent(intent)
+    }
+
+    private fun handleIncomingModIntent(intent: Intent?) {
+        val uri = intent?.data ?: return
+        val action = intent.action ?: return
+        if (action != Intent.ACTION_VIEW) return
+        lifecycleScope.launch {
+            val imported = withContext(Dispatchers.IO) {
+                ImportedModRepository.importMod(this@MainActivity, uri)
+            }
+            if (imported.success) {
+                if (LatestFingerprintStore.readStoredClientHelloHash(filesDir).isNullOrBlank()) {
+                    LatestFingerprintRepository.fetchLatest(this@MainActivity)
+                }
+                ModFilesRepository.prepareFiles(this@MainActivity)
+                Toast.makeText(this@MainActivity, getString(R.string.toast_mod_imported_from_file), Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@MainActivity, getString(R.string.toast_invalid_mod_archive), Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }
 
@@ -138,8 +173,10 @@ private fun MainScreen() {
     val isAutoVpnDisableEnabled by VpnLogRepository.isAutoVpnDisableEnabled.collectAsState()
     val isInstallResultNotificationsEnabled by VpnLogRepository.isInstallResultNotificationsEnabled.collectAsState()
     val showReinstallWarningAfterDelete by VpnLogRepository.showReinstallWarningAfterDelete.collectAsState()
+    val isThoroughModDeleteEnabled by VpnLogRepository.isThoroughModDeleteEnabled.collectAsState()
     val isAutoPrepareFilesEnabled by VpnLogRepository.isAutoPrepareFilesEnabled.collectAsState()
     val autoPrepareFilesDelaySeconds by VpnLogRepository.autoPrepareFilesDelaySeconds.collectAsState()
+    val exportLogLines by VpnLogRepository.exportLogLines.collectAsState()
     val isIpFilterEnabled by VpnLogRepository.isIpFilterEnabled.collectAsState()
     val ipFilterText by VpnLogRepository.ipFilterText.collectAsState()
     val packageText by VpnLogRepository.packageText.collectAsState()
@@ -154,10 +191,11 @@ private fun MainScreen() {
     var pendingCleanupMode by remember { mutableStateOf(false) }
     var pendingCleanupReason by remember { mutableStateOf<CleanupReasonSpec?>(null) }
     var showSettings by remember { mutableStateOf(false) }
-    var showModFeatures by remember { mutableStateOf(false) }
+    var expandedFeaturesModId by remember { mutableStateOf<String?>(null) }
     var pendingManualLaunchHint by remember { mutableStateOf<PendingManualLaunchHint?>(null) }
     var showReinstallAfterDeleteWarning by remember { mutableStateOf(false) }
     var showImportedModDeleteConfirm by remember { mutableStateOf(false) }
+    var autoPrepareRequestId by remember { mutableStateOf(0) }
     val modFolderNotSelected = stringResource(R.string.value_mod_folder_not_selected)
     val stopLabel = stringResource(R.string.button_stop)
     val installLabel = stringResource(R.string.button_install_mod)
@@ -196,23 +234,27 @@ private fun MainScreen() {
         }
     }
 
+    fun requestAutoPrepare() {
+        autoPrepareRequestId++
+    }
+
     LaunchedEffect(
-        importedModState.fileName,
-        importedModState.isEnabled,
-        importedModState.featureSelection.enabledFeatureIds,
+        autoPrepareRequestId,
         isAutoPrepareFilesEnabled,
         autoPrepareFilesDelaySeconds,
-        latestFingerprintState.savedRootSha
+        latestFingerprintState.savedRootSha,
+        isRunning
     ) {
         if (
+            autoPrepareRequestId > 0 &&
             isAutoPrepareFilesEnabled &&
-            importedModState.fileName != null &&
+            importedModState.mods.isNotEmpty() &&
             latestFingerprintState.savedRootSha != null &&
             !isRunning
         ) {
             delay(VpnLogRepository.autoPrepareFilesDelayMillisNow())
             val currentPreparation = ModFilesRepository.preparation.value
-            if (!currentPreparation.isPreparing && !currentPreparation.isReady) {
+            if (!currentPreparation.isPreparing) {
                 ModFilesRepository.prepareFiles(context)
             }
         }
@@ -266,11 +308,12 @@ private fun MainScreen() {
                 val imported = withContext(Dispatchers.IO) {
                     ImportedModRepository.importMod(context, uri)
                 }
-                if (imported) {
+                if (imported.success) {
                     if (LatestFingerprintStore.readStoredClientHelloHash(context.filesDir).isNullOrBlank()) {
                         LatestFingerprintRepository.fetchLatest(context)
                     }
                     ModFilesRepository.prepareFiles(context)
+                    Toast.makeText(context, context.getString(R.string.toast_mod_imported_from_file), Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, invalidModArchiveToast, Toast.LENGTH_SHORT).show()
                     ModFilesRepository.refreshState(context)
@@ -303,8 +346,10 @@ private fun MainScreen() {
             isAutoVpnDisableEnabled = isAutoVpnDisableEnabled,
             isInstallResultNotificationsEnabled = isInstallResultNotificationsEnabled,
             showReinstallWarningAfterDelete = showReinstallWarningAfterDelete,
+            isThoroughModDeleteEnabled = isThoroughModDeleteEnabled,
             isAutoPrepareFilesEnabled = isAutoPrepareFilesEnabled,
             autoPrepareFilesDelaySeconds = autoPrepareFilesDelaySeconds,
+            exportLogLines = exportLogLines,
             isIpFilterEnabled = isIpFilterEnabled,
             ipFilterText = ipFilterText,
             packageText = packageText,
@@ -335,11 +380,17 @@ private fun MainScreen() {
             onShowReinstallWarningAfterDeleteChange = { enabled ->
                 VpnLogRepository.setShowReinstallWarningAfterDelete(context, enabled)
             },
+            onThoroughModDeleteChange = { enabled ->
+                VpnLogRepository.setThoroughModDeleteEnabled(context, enabled)
+            },
             onAutoPrepareFilesEnabledChange = { enabled ->
                 VpnLogRepository.setAutoPrepareFilesEnabled(context, enabled)
             },
             onAutoPrepareFilesDelaySecondsChange = { value ->
                 VpnLogRepository.setAutoPrepareFilesDelaySeconds(context, value)
+            },
+            onExportLogLinesChange = { value ->
+                VpnLogRepository.setExportLogLines(context, value)
             },
             onFetchLatest = {
                 scope.launch {
@@ -429,6 +480,7 @@ private fun MainScreen() {
                         showImportedModDeleteConfirm = false
                         ImportedModRepository.clear(context)
                         ModFilesRepository.refreshState(context)
+                        requestAutoPrepare()
                     }
                 ) {
                     Text(stringResource(R.string.button_remove_mod))
@@ -485,7 +537,7 @@ private fun MainScreen() {
                                 )
                             }
                             SettingsGearButton(
-                                enabled = !latestFingerprintState.isFetching,
+                                enabled = true,
                                 onClick = { showSettings = true }
                             )
                         }
@@ -511,7 +563,7 @@ private fun MainScreen() {
 
                 SectionCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        SectionTitle("Мод")
+                        SectionTitle("Моды")
                         Button(
                             enabled = !isRunning && !preparation.isPreparing,
                             onClick = { modImportLauncher.launch(arrayOf("*/*")) },
@@ -527,36 +579,74 @@ private fun MainScreen() {
                             Text(stringResource(R.string.button_import_mod), fontSize = 16.sp)
                         }
 
-                        if (importedModState.mods.isEmpty()) {
-                            Text(
-                                text = modFolderNotSelected,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
+                        if (importedModState.mods.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = if (preparation.isPreparing) {
+                                        preparingLabel
+                                    } else {
+                                        when {
+                                            preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
+                                            preparation.error != null -> "$errorPrefix ${preparation.error}"
+                                            preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
+                                            else -> emptyLabel
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (preparation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                IconButton(
+                                    enabled = !isRunning && !preparation.isPreparing,
+                                    onClick = { scope.launch { ModFilesRepository.prepareFiles(context) } },
+                                    modifier = Modifier.size(44.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = stringResource(R.string.button_refresh_mod_files),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                }
+                            }
+                            if (preparation.isPreparing) {
+                                if (preparation.totalCount > 0) {
+                                    CleanLinearProgressIndicator(progress = preparation.progress, modifier = Modifier.fillMaxWidth())
+                                } else {
+                                    CleanIndeterminateProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                }
+                            }
                             importedModState.mods.forEach { mod ->
                                 ImportedModListCard(
                                     context = context,
                                     mod = mod,
                                     isRunning = isRunning,
-                                    preparation = preparation,
+                                    isPreparing = preparation.isPreparing,
                                     isSelectedForDetails = mod.id == importedModState.selectedModId,
-                                    showFeatures = showModFeatures && mod.id == importedModState.selectedModId,
+                                    showFeatures = expandedFeaturesModId == mod.id,
                                     onSelect = { ImportedModRepository.selectMod(context, mod.id) },
+                                    onMoveUp = {
+                                        ImportedModRepository.moveModUp(context, mod.id)
+                                        requestAutoPrepare()
+                                    },
+                                    onMoveDown = {
+                                        ImportedModRepository.moveModDown(context, mod.id)
+                                        requestAutoPrepare()
+                                    },
                                     onToggleFeatures = {
-                                        ImportedModRepository.selectMod(context, mod.id)
-                                        showModFeatures = !showModFeatures
+                                        expandedFeaturesModId = if (expandedFeaturesModId == mod.id) null else mod.id
                                     },
                                     onToggleEnabled = {
                                         ImportedModRepository.setModEnabled(context, mod.id, !mod.isEnabled)
+                                        requestAutoPrepare()
                                     },
                                     onDelete = {
                                         ImportedModRepository.selectMod(context, mod.id)
                                         showImportedModDeleteConfirm = true
-                                    },
-                                    onRefresh = {
-                                        ImportedModRepository.selectMod(context, mod.id)
-                                        scope.launch { ModFilesRepository.prepareFiles(context) }
                                     },
                                     onFeatureSelectionChange = { selectedIds, preferredFeatureId ->
                                         val conflict = ImportedModRepository.updateFeatureSelection(
@@ -572,15 +662,14 @@ private fun MainScreen() {
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }
+                                        requestAutoPrepare()
                                     },
-                                    fingerprintRequiredStatus = fingerprintRequiredStatus,
-                                    preparingLabel = preparingLabel,
-                                    readyLabel = readyLabel,
-                                    emptyLabel = emptyLabel,
-                                    errorPrefix = errorPrefix,
                                     enableModLabel = enableModLabel,
                                     disableModLabel = disableModLabel,
-                                    iconBitmap = if (mod.id == importedModState.selectedModId) importedIconBitmap else ImportedModRepository.iconFile(context, mod.id).takeIf { it.isFile }?.let { BitmapFactory.decodeFile(it.absolutePath) }
+                                    currentGameVersion = latestFingerprintState.savedGameVersion,
+                                    iconBitmap = ImportedModRepository.iconFile(context, mod.id)
+                                        .takeIf { it.isFile }
+                                        ?.let { BitmapFactory.decodeFile(it.absolutePath) }
                                 )
                             }
                         }
@@ -1064,24 +1153,22 @@ private fun ImportedModListCard(
     context: Context,
     mod: lilmuff1.bsml.state.ImportedModListItem,
     isRunning: Boolean,
-    preparation: lilmuff1.bsml.state.ModPreparationState,
+    isPreparing: Boolean,
     isSelectedForDetails: Boolean,
     showFeatures: Boolean,
     onSelect: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
     onToggleFeatures: () -> Unit,
     onToggleEnabled: () -> Unit,
     onDelete: () -> Unit,
-    onRefresh: () -> Unit,
     onFeatureSelectionChange: (Set<String>, String?) -> Unit,
-    fingerprintRequiredStatus: String,
-    preparingLabel: String,
-    readyLabel: String,
-    emptyLabel: String,
-    errorPrefix: String,
     enableModLabel: String,
     disableModLabel: String,
+    currentGameVersion: Int?,
     iconBitmap: Bitmap?
 ) {
+    val controlsEnabled = !isRunning && !isPreparing
     SectionCard(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f), contentPadding = 14.dp) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
@@ -1093,11 +1180,21 @@ private fun ImportedModListCard(
                     Image(
                         bitmap = icon.asImageBitmap(),
                         contentDescription = null,
-                        modifier = Modifier.size(56.dp).clip(RoundedCornerShape(10.dp))
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .alpha(if (mod.isEnabled) 1f else 0.48f)
                     )
                 }
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                Column(
+                    modifier = Modifier.weight(1f).alpha(if (mod.isEnabled) 1f else 0.48f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         HtmlText(
                             html = mod.metadata?.title ?: mod.fileName,
                             textSizeSp = 18f,
@@ -1107,70 +1204,95 @@ private fun ImportedModListCard(
                         mod.metadata?.version?.let { VersionBadge(text = it) }
                     }
                     mod.metadata?.author?.let {
-                        HtmlText(html = it, textSizeSp = 13f, color = MaterialTheme.colorScheme.primary.toArgb(), modifier = Modifier.fillMaxWidth())
+                        HtmlText(
+                            html = it,
+                            textSizeSp = 13f,
+                            color = MaterialTheme.colorScheme.primary.toArgb(),
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
-                    mod.metadata?.description?.let {
-                        HtmlText(html = it, textSizeSp = 13f, color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(), modifier = Modifier.fillMaxWidth())
+                }
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.alpha(if (mod.isEnabled) 1f else 0.48f)
+                ) {
+                    IconButton(onClick = onMoveUp, enabled = controlsEnabled, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                    IconButton(onClick = onMoveDown, enabled = controlsEnabled, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
                 }
             }
 
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = if (!mod.isEnabled) {
-                        emptyLabel
-                    } else if (preparation.isPreparing && isSelectedForDetails) {
-                        preparingLabel
-                    } else if (isSelectedForDetails) {
-                        when {
-                            preparation.error == "fingerprint_not_loaded" -> fingerprintRequiredStatus
-                            preparation.error != null -> "$errorPrefix ${preparation.error}"
-                            preparation.isReady -> "$readyLabel ${preparation.preparedCount}"
-                            else -> emptyLabel
-                        }
-                    } else {
-                        if (mod.isEnabled) "Включен" else "Выключен"
-                    },
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                IconButton(enabled = mod.isEnabled && !isRunning && !preparation.isPreparing, onClick = onRefresh, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.button_refresh_mod_files), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth().alpha(if (mod.isEnabled) 1f else 0.48f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (mod.metadata?.isSignatureVerified == false) {
+                    Text(
+                        text = stringResource(R.string.warning_mod_unverified_signature),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
-            }
-
-            if (isSelectedForDetails && preparation.isPreparing) {
-                if (preparation.totalCount > 0) {
-                    CleanLinearProgressIndicator(progress = preparation.progress, modifier = Modifier.fillMaxWidth())
-                } else {
-                    CleanIndeterminateProgressIndicator(modifier = Modifier.fillMaxWidth())
+                mod.metadata?.description?.let {
+                    HtmlText(html = it, textSizeSp = 13f, color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(), modifier = Modifier.fillMaxWidth())
+                }
+                val modGameVersion = mod.metadata?.gameVersion
+                if (modGameVersion != null && currentGameVersion != null && modGameVersion < currentGameVersion) {
+                    Text(
+                        text = stringResource(R.string.warning_mod_old_game_version, modGameVersion, currentGameVersion),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(enabled = !isRunning && !preparation.isPreparing, onClick = onToggleEnabled, modifier = Modifier.weight(1f).height(46.dp), shape = RoundedCornerShape(6.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), contentColor = MaterialTheme.colorScheme.onSurface)) {
+                Button(
+                    enabled = controlsEnabled,
+                    onClick = onToggleEnabled,
+                    modifier = Modifier.weight(1f).height(46.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (mod.isEnabled) {
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        contentColor = if (mod.isEnabled) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onPrimary
+                        }
+                    )
+                ) {
                     Icon(Icons.Rounded.PowerSettingsNew, contentDescription = if (mod.isEnabled) disableModLabel else enableModLabel, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(if (mod.isEnabled) disableModLabel else enableModLabel, fontSize = 16.sp)
                 }
-                Button(enabled = !isRunning && !preparation.isPreparing, onClick = onDelete, modifier = Modifier.weight(1f).height(46.dp), shape = RoundedCornerShape(6.dp), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), contentColor = MaterialTheme.colorScheme.onSurface)) {
-                    Icon(Icons.Rounded.DeleteOutline, contentDescription = stringResource(R.string.button_remove_mod), modifier = Modifier.size(20.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(stringResource(R.string.button_remove_mod), fontSize = 14.sp)
-                }
-                IconButton(enabled = mod.features.isNotEmpty() && !preparation.isPreparing && !isRunning, onClick = { onSelect(); onToggleFeatures() }, modifier = Modifier.size(46.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))) {
-                    Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+                if (mod.isEnabled) {
+                    Button(enabled = controlsEnabled, onClick = onDelete, modifier = Modifier.weight(1f).height(46.dp), shape = RoundedCornerShape(6.dp), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), contentColor = MaterialTheme.colorScheme.onSurface)) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = stringResource(R.string.button_remove_mod), modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(stringResource(R.string.button_remove_mod), fontSize = 14.sp)
+                    }
+                    IconButton(enabled = mod.features.isNotEmpty() && controlsEnabled, onClick = { onSelect(); onToggleFeatures() }, modifier = Modifier.size(46.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))) {
+                        Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+                    }
                 }
             }
 
-            if (showFeatures && mod.features.isNotEmpty()) {
+            if (mod.isEnabled && showFeatures && mod.features.isNotEmpty()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                 FeatureSelectionSection(
                     features = mod.features,
                     groups = mod.featureGroups,
                     selectedIds = mod.featureSelection.enabledFeatureIds,
-                    enabled = !preparation.isPreparing && !isRunning,
+                    enabled = controlsEnabled,
                     onSelectionChange = onFeatureSelectionChange
                 )
             }
@@ -1184,8 +1306,10 @@ private fun SettingsDialog(
     isAutoVpnDisableEnabled: Boolean,
     isInstallResultNotificationsEnabled: Boolean,
     showReinstallWarningAfterDelete: Boolean,
+    isThoroughModDeleteEnabled: Boolean,
     isAutoPrepareFilesEnabled: Boolean,
     autoPrepareFilesDelaySeconds: String,
+    exportLogLines: String,
     isIpFilterEnabled: Boolean,
     ipFilterText: String,
     packageText: String,
@@ -1203,8 +1327,10 @@ private fun SettingsDialog(
     onClearOriginalAssetsFolder: () -> Unit,
     onInstallResultNotificationsChange: (Boolean) -> Unit,
     onShowReinstallWarningAfterDeleteChange: (Boolean) -> Unit,
+    onThoroughModDeleteChange: (Boolean) -> Unit,
     onAutoPrepareFilesEnabledChange: (Boolean) -> Unit,
     onAutoPrepareFilesDelaySecondsChange: (String) -> Unit,
+    onExportLogLinesChange: (String) -> Unit,
     onFetchLatest: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1239,58 +1365,6 @@ private fun SettingsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_ip_filter),
-                    checked = isIpFilterEnabled,
-                    onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
-                    enabled = !isRunning
-                )
-                if (isIpFilterEnabled) {
-                    ArrayTextField(
-                        value = ipFilterText,
-                        onValueChange = { VpnLogRepository.setIpFilterText(context, it) },
-                        enabled = !isRunning,
-                        label = stringResource(R.string.label_ip_hosts)
-                    )
-                } else {
-                    ArrayTextField(
-                        value = packageText,
-                        onValueChange = { VpnLogRepository.setPackageText(context, it) },
-                        enabled = !isRunning,
-                        label = stringResource(R.string.label_package_names)
-                    )
-                }
-                OutlinedTextField(
-                    value = portText,
-                    onValueChange = { VpnLogRepository.setPortText(context, it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isRunning,
-                    label = { Text(stringResource(R.string.label_port)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
-                SectionTitle(stringResource(R.string.title_original_assets))
-                LabeledValue(
-                    label = stringResource(R.string.label_original_assets_folder),
-                    value = originalAssetsFolderName ?: stringResource(R.string.value_mod_folder_not_selected)
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        enabled = !isRunning,
-                        onClick = onSelectOriginalAssetsFolder,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(stringResource(R.string.button_select_original_assets_folder))
-                    }
-                    if (originalAssetsFolderName != null) {
-                        TextButton(
-                            enabled = !isRunning,
-                            onClick = onClearOriginalAssetsFolder
-                        ) {
-                            Text(stringResource(R.string.button_clear))
-                        }
-                    }
-                }
                 SectionTitle(stringResource(R.string.title_auto_launch))
                 if (launchableApps.isNotEmpty()) {
                     Text(
@@ -1356,6 +1430,107 @@ private fun SettingsDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_ip_filter),
+                    checked = isIpFilterEnabled,
+                    onCheckedChange = { VpnLogRepository.setIpFilterEnabled(context, it) },
+                    enabled = !isRunning
+                )
+                if (isIpFilterEnabled) {
+                    ArrayTextField(
+                        value = ipFilterText,
+                        onValueChange = { VpnLogRepository.setIpFilterText(context, it) },
+                        enabled = !isRunning,
+                        label = stringResource(R.string.label_ip_hosts)
+                    )
+                } else {
+                    ArrayTextField(
+                        value = packageText,
+                        onValueChange = { VpnLogRepository.setPackageText(context, it) },
+                        enabled = !isRunning,
+                        label = stringResource(R.string.label_package_names)
+                    )
+                }
+                OutlinedTextField(
+                    value = portText,
+                    onValueChange = { VpnLogRepository.setPortText(context, it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRunning,
+                    label = { Text(stringResource(R.string.label_port)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                SectionTitle(stringResource(R.string.title_original_assets))
+                if (originalAssetsFolderName == null) {
+                    OutlinedButton(
+                        enabled = !isRunning,
+                        onClick = onSelectOriginalAssetsFolder,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.button_select_original_assets_folder))
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = originalAssetsFolderName,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        IconButton(enabled = !isRunning, onClick = onClearOriginalAssetsFolder) {
+                            Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.button_clear))
+                        }
+                    }
+                }
+                SectionTitle(stringResource(R.string.title_misc))
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_reinstall_after_delete_warning),
+                    checked = showReinstallWarningAfterDelete,
+                    onCheckedChange = onShowReinstallWarningAfterDeleteChange
+                )
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_thorough_mod_delete),
+                    checked = isThoroughModDeleteEnabled,
+                    onCheckedChange = onThoroughModDeleteChange,
+                    enabled = !isRunning
+                )
+                Text(
+                    text = stringResource(R.string.hint_thorough_mod_delete),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                SettingsSwitchRow(
+                    label = stringResource(R.string.label_auto_prepare_files),
+                    checked = isAutoPrepareFilesEnabled,
+                    onCheckedChange = onAutoPrepareFilesEnabledChange,
+                    enabled = !isRunning
+                )
+                OutlinedTextField(
+                    value = autoPrepareFilesDelaySeconds,
+                    onValueChange = onAutoPrepareFilesDelaySecondsChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRunning && isAutoPrepareFilesEnabled,
+                    label = { Text(stringResource(R.string.label_auto_prepare_files_delay_seconds)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                OutlinedButton(
+                    onClick = { exportBsmlLogs(context) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(stringResource(R.string.button_export_logs))
+                }
+                OutlinedTextField(
+                    value = exportLogLines,
+                    onValueChange = onExportLogLinesChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRunning,
+                    label = { Text(stringResource(R.string.label_export_log_lines)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
                 SectionTitle(stringResource(R.string.title_fingerprint))
                 LabeledValue(
                     label = latestFingerprintLabel,
@@ -1386,12 +1561,6 @@ private fun SettingsDialog(
                             color = MaterialTheme.colorScheme.error
                         )
                     }
-                    !latestFingerprintState.message.isNullOrBlank() -> {
-                        Text(
-                            text = latestFingerprintState.message ?: "",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
                 }
                 OutlinedButton(
                     enabled = !isRunning && !latestFingerprintState.isFetching,
@@ -1400,74 +1569,48 @@ private fun SettingsDialog(
                 ) {
                     Text(stringResource(R.string.button_fetch_latest_fingerprint))
                 }
-                SectionTitle(stringResource(R.string.title_misc))
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_reinstall_after_delete_warning),
-                    checked = showReinstallWarningAfterDelete,
-                    onCheckedChange = onShowReinstallWarningAfterDeleteChange
-                )
-                SettingsSwitchRow(
-                    label = stringResource(R.string.label_auto_prepare_files),
-                    checked = isAutoPrepareFilesEnabled,
-                    onCheckedChange = onAutoPrepareFilesEnabledChange,
-                    enabled = !isRunning
-                )
-                OutlinedTextField(
-                    value = autoPrepareFilesDelaySeconds,
-                    onValueChange = onAutoPrepareFilesDelaySecondsChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isRunning && isAutoPrepareFilesEnabled,
-                    label = { Text(stringResource(R.string.label_auto_prepare_files_delay_seconds)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
-                OutlinedButton(
-                    onClick = { exportBsmlLogs(context) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(stringResource(R.string.button_export_logs))
-                }
                 SectionTitle(stringResource(R.string.title_author_links))
-                AuthorLinkRow(
-                    label = stringResource(R.string.label_author_telegram),
-                    url = "https://t.me/lilmuff1"
-                )
-                AuthorLinkRow(
-                    label = stringResource(R.string.label_author_discord),
-                    url = "https://discord.com/users/lilmuff1"
-                )
-                AuthorLinkRow(
-                    label = stringResource(R.string.label_author_github),
-                    url = "https://github.com/lilmuff2"
-                )
-                AuthorLinkRow(
-                    label = stringResource(R.string.label_author_website),
-                    url = "https://lilmuff1.xyz"
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_telegram), stringResource(R.string.label_author_telegram), "https://t.me/lilmuff1")
+                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_discord), stringResource(R.string.label_author_discord), "https://discord.com/users/lilmuff1")
+                    AuthorLinkPainterIcon(painterResource(R.drawable.ic_github), stringResource(R.string.label_author_github), "https://github.com/lilmuff2/bsml")
+                    AuthorLinkIcon(Icons.Rounded.Public, stringResource(R.string.label_author_website), "https://lilmuff1.xyz")
+                }
             }
         }
     )
 }
 
 @Composable
-private fun AuthorLinkRow(label: String, url: String) {
+private fun AuthorLinkIcon(
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    url: String
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { openExternalUrl(context, url) }
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium
+    IconButton(onClick = { openExternalUrl(context, url) }) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = label,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(26.dp)
         )
-        Text(
-            text = url.removePrefix("https://"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary
+    }
+}
+
+@Composable
+private fun AuthorLinkPainterIcon(
+    painter: androidx.compose.ui.graphics.painter.Painter,
+    label: String,
+    url: String
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    IconButton(onClick = { openExternalUrl(context, url) }) {
+        Icon(
+            painter = painter,
+            contentDescription = label,
+            tint = androidx.compose.ui.graphics.Color.Unspecified,
+            modifier = Modifier.size(26.dp)
         )
     }
 }
@@ -1547,7 +1690,8 @@ private fun stopMonitoring(context: Context) {
 }
 
 private fun exportBsmlLogs(context: Context) {
-    val logs = VpnLogRepository.exportLogsText().ifBlank { "BSMLLocalVpn logs are empty" }
+    val logs = VpnLogRepository.exportLogsText(limit = VpnLogRepository.exportLogLinesNow())
+        .ifBlank { "BSMLLocalVpn logs are empty" }
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
         putExtra(Intent.EXTRA_SUBJECT, "BSMLLocalVpn logs")

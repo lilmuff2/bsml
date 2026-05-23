@@ -6,8 +6,11 @@
     <string name="hint_auto_disable_vpn">После завершения установки приложение отключит перехват. Игра может показать ошибку соединения это нормально.</string>
     <string name="label_install_result_notifications">Уведомления о результате установки</string>
     <string name="label_reinstall_after_delete_warning">Предупреждать перед установкой мода после удаления</string>
+    <string name="label_thorough_mod_delete">Тщательное удаление модов</string>
+    <string name="hint_thorough_mod_delete">Может занимать больше времени.</string>
     <string name="label_auto_prepare_files">Авто подготовка файлов</string>
     <string name="label_auto_prepare_files_delay_seconds">Задержка авто подготовки, сек</string>
+    <string name="label_export_log_lines">Строк логов для экспорта</string>
     <string name="label_auto_launch_app">Приложение для автозапуска</string>
     <string name="option_no_auto_launch">Без автозапуска</string>
     <string name="label_ip_filter">Фильтр по IP</string>
@@ -72,6 +75,10 @@
     <string name="status_latest_fingerprint_error_prefix">Ошибка fingerprint: %1$s</string>
     <string name="toast_invalid_mod_archive">Выбранный файл не является модом nbassets</string>
     <string name="toast_feature_conflict">%1$s конфликтует с %2$s</string>
+    <string name="toast_mod_imported_from_file">Мод импортирован</string>
+    <string name="toast_mod_unverified_signature">Мод непроверенный и может не работать: архив не подписан нужной подписью</string>
+    <string name="warning_mod_unverified_signature">Мод непроверенный и может не работать: архив не подписан нужной подписью</string>
+    <string name="warning_mod_old_game_version">Мод для старой версии игры (%1$d), текущая версия: %2$d</string>
     <string name="option_no_feature">Никакую</string>
     <string name="label_author_telegram">Telegram</string>
     <string name="label_author_discord">Discord</string>

@@ -40,6 +40,8 @@ object VpnLogRepository {
     private const val KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE = "show_reinstall_warning_after_delete"
     private const val KEY_AUTO_PREPARE_FILES_ENABLED = "auto_prepare_files_enabled"
     private const val KEY_AUTO_PREPARE_FILES_DELAY_SECONDS = "auto_prepare_files_delay_seconds"
+    private const val KEY_EXPORT_LOG_LINES = "export_log_lines"
+    private const val KEY_THOROUGH_MOD_DELETE = "thorough_mod_delete"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
 
     private val logLock = Any()
@@ -97,6 +99,12 @@ object VpnLogRepository {
     private val _autoPrepareFilesDelaySeconds = MutableStateFlow("3")
     val autoPrepareFilesDelaySeconds = _autoPrepareFilesDelaySeconds.asStateFlow()
 
+    private val _exportLogLines = MutableStateFlow("50")
+    val exportLogLines = _exportLogLines.asStateFlow()
+
+    private val _isThoroughModDeleteEnabled = MutableStateFlow(false)
+    val isThoroughModDeleteEnabled = _isThoroughModDeleteEnabled.asStateFlow()
+
     private val _deleteCleanupPending = MutableStateFlow(false)
     val deleteCleanupPending = _deleteCleanupPending.asStateFlow()
 
@@ -121,6 +129,8 @@ object VpnLogRepository {
             _showReinstallWarningAfterDelete.value = prefs.getBoolean(KEY_SHOW_REINSTALL_WARNING_AFTER_DELETE, true)
             _isAutoPrepareFilesEnabled.value = prefs.getBoolean(KEY_AUTO_PREPARE_FILES_ENABLED, true)
             _autoPrepareFilesDelaySeconds.value = prefs.getInt(KEY_AUTO_PREPARE_FILES_DELAY_SECONDS, 3).toString()
+            _exportLogLines.value = prefs.getInt(KEY_EXPORT_LOG_LINES, 50).toString()
+            _isThoroughModDeleteEnabled.value = prefs.getBoolean(KEY_THOROUGH_MOD_DELETE, false)
             preferencesLoaded = true
         }
     }
@@ -269,6 +279,27 @@ object VpnLogRepository {
         return seconds * 1_000L
     }
 
+    fun setExportLogLines(context: Context, text: String) {
+        val normalized = text.filter { it.isDigit() }
+            .take(4)
+            .toIntOrNull()
+            ?.coerceIn(1, MAX_LOGS)
+            ?: 50
+        _exportLogLines.value = normalized.toString()
+        updatePreference(context) { putInt(KEY_EXPORT_LOG_LINES, normalized) }
+    }
+
+    fun exportLogLinesNow(): Int {
+        return _exportLogLines.value.toIntOrNull()?.coerceIn(1, MAX_LOGS) ?: 50
+    }
+
+    fun setThoroughModDeleteEnabled(context: Context, isEnabled: Boolean) {
+        _isThoroughModDeleteEnabled.value = isEnabled
+        updatePreference(context) { putBoolean(KEY_THOROUGH_MOD_DELETE, isEnabled) }
+    }
+
+    fun isThoroughModDeleteEnabledNow(): Boolean = _isThoroughModDeleteEnabled.value
+
     fun markDeleteCleanupPending() {
         _deleteCleanupPending.value = true
     }
@@ -298,8 +329,11 @@ object VpnLogRepository {
         _logs.value = emptyList()
     }
 
-    fun exportLogsText(): String {
-        return _logs.value.asReversed().joinToString(separator = "\n")
+    fun exportLogsText(limit: Int = MAX_LOGS): String {
+        return _logs.value
+            .asReversed()
+            .take(limit.coerceAtLeast(0))
+            .joinToString(separator = "\n")
     }
 
     fun log(message: String) {

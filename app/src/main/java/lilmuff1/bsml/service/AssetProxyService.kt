@@ -19,6 +19,7 @@ import androidx.core.app.NotificationCompat
 import java.io.File
 import lilmuff1.bsml.asset.LocalAssetProxyServer
 import lilmuff1.bsml.asset.PatchedAsset
+import lilmuff1.bsml.config.externalAssetBaseUrl
 import lilmuff1.bsml.config.GENERATED_ASSET_DIR
 
 class AssetProxyService : Service() {
@@ -31,12 +32,14 @@ class AssetProxyService : Service() {
                     length = generated.length(),
                     openStream = { generated.inputStream() }
                 )
+            } else if (VpnLogRepository.isDeleteCleanupPendingNow() && VpnLogRepository.isThoroughModDeleteEnabledNow()) {
+                null
             } else {
                 ModFilesRepository.findPreparedFile(applicationContext, path)?.let { entry ->
                     PatchedAsset(
                         length = entry.size,
                         openStream = {
-                            applicationContext.contentResolver.openInputStream(android.net.Uri.parse(entry.uri))
+                            ModFilesRepository.openPreparedInputStream(applicationContext, android.net.Uri.parse(entry.uri))
                                 ?: error("prepared asset open failed: ${entry.path}")
                         }
                     )

@@ -24,6 +24,7 @@ import java.io.File
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -122,6 +123,7 @@ class LocalVpnService : VpnService() {
         cleanupModeEnabled = cleanupMode
         this.cleanupReasonCode = cleanupReasonCode
         this.cleanupReasonName = cleanupReasonName
+        AssetRoutingRepository.reset()
         cleanupWarmupSent = false
         cleanupNormalHashSeen = false
         if (cleanupMode) {
@@ -162,6 +164,16 @@ class LocalVpnService : VpnService() {
                 } else {
                     emptyList()
                 }
+                val configuredTargets = parseList(captureSettings.ipFilterText, GAME_HOST)
+                val configuredPackages = parseList(captureSettings.packageText, DEFAULT_CAPTURE_PACKAGES)
+                val usePublicAssetHost = captureSettings.autoLaunchPackage == "com.tencent.tmgp.supercell.brawlstars" ||
+                    configuredPackages.singleOrNull() == "com.tencent.tmgp.supercell.brawlstars"
+                AssetRoutingRepository.setUsePublicAssetHost(usePublicAssetHost)
+                val publicAssetAddresses = if (usePublicAssetHost) {
+                    resolveTargetAddresses(listOf(PUBLIC_ASSET_HOST))
+                } else {
+                    emptyList()
+                }
                 if (captureSettings.filterByIp && targetAddresses.isEmpty()) {
                     VpnLogRepository.log("VPN resolve failed for ${captureSettings.ipFilterText.ifBlank { GAME_HOST }}")
                     VpnLogRepository.setStatus("Resolve failed")
@@ -179,6 +191,9 @@ class LocalVpnService : VpnService() {
                 applyAllowedApplications(builder, allowedPackages)
                 if (captureSettings.filterByIp) {
                     targetAddresses.forEach { address ->
+                        builder.addRoute(address.hostAddress ?: return@forEach, 32)
+                    }
+                    publicAssetAddresses.forEach { address ->
                         builder.addRoute(address.hostAddress ?: return@forEach, 32)
                     }
                 } else {
@@ -207,7 +222,7 @@ class LocalVpnService : VpnService() {
                 }
 
                 val targetIpInts = if (captureSettings.filterByIp) {
-                    targetAddresses.map { ipv4BytesToInt(it.address) }.toSet()
+                    (targetAddresses + publicAssetAddresses).map { ipv4BytesToInt(it.address) }.toSet()
                 } else {
                     null
                 }
@@ -322,14 +337,16 @@ class LocalVpnService : VpnService() {
     }
 
     private fun handleTcpPacket(event: PacketEvent, targetPort: Int) {
-        if (event.destinationPort != targetPort && event.sourcePort != targetPort) {
+        val isAssetProxyTraffic = AssetRoutingRepository.usePublicAssetHostNow() &&
+            (event.destinationPort == LOCAL_ASSET_PORT || event.sourcePort == LOCAL_ASSET_PORT)
+        if (!isAssetProxyTraffic && event.destinationPort != targetPort && event.sourcePort != targetPort) {
             return
         }
 
         val flags = event.tcpFlags
         val clientPayload = event.payload()
 
-        if (flags and TCP_SYN != 0 && event.destinationPort == targetPort) {
+        if (flags and TCP_SYN != 0 && (event.destinationPort == targetPort || isAssetProxyTraffic)) {
             debugLog("TCP SYN ${event.sourceIp}:${event.sourcePort} -> ${event.destinationIp}:${event.destinationPort}")
             if (!proxyState.tryStartSession(event)) {
                 debugLog("Reject extra SYN ${event.sourcePort}, active session is already running")
@@ -464,6 +481,14 @@ class LocalVpnService : VpnService() {
                 proxyState.remove(key)
             }
 
+            override fun resolveRemoteAddress(serverIp: Int, serverPort: Int): InetSocketAddress {
+                return if (AssetRoutingRepository.usePublicAssetHostNow() && serverPort == LOCAL_ASSET_PORT) {
+                    InetSocketAddress(LOCAL_ASSET_HOST, LOCAL_ASSET_PORT)
+                } else {
+                    InetSocketAddress(intToIpv4(serverIp), serverPort)
+                }
+            }
+
             override fun shouldRewriteContentHash(): Boolean =
                 InstallFlowRepository.isContentHashRewriteEnabled() &&
                     !InstallFlowRepository.wasFinalClientHelloSeen()
@@ -525,7 +550,8 @@ class LocalVpnService : VpnService() {
                     body = body,
                     reasonCode = 7,
                     reasonName = "CLIENT_CONTENT_UPDATE",
-                    reasonText = "BSML cleanup warmup"
+                    reasonText = "BSML cleanup warmup",
+                    thoroughCleanup = VpnLogRepository.isThoroughModDeleteEnabledNow()
                 )
             } else {
                 val activeReasonCode = if (cleanupNormalHashSeen) cleanupReasonCode else 1
@@ -534,7 +560,8 @@ class LocalVpnService : VpnService() {
                     body = body,
                     reasonCode = activeReasonCode,
                     reasonName = activeReasonName,
-                    reasonText = getString(R.string.message_restart_game_to_remove_mods)
+                    reasonText = getString(R.string.message_restart_game_to_remove_mods),
+                    thoroughCleanup = VpnLogRepository.isThoroughModDeleteEnabledNow()
                 )
             }
         } else {
@@ -591,7 +618,8 @@ class LocalVpnService : VpnService() {
                 reasonCode = reasonCode,
                 reasonName = reasonName,
                 reasonText = reasonText,
-                forceRewriteFingerprint = isWarmup
+                forceRewriteFingerprint = isWarmup,
+                thoroughCleanup = VpnLogRepository.isThoroughModDeleteEnabledNow()
             )
             handleLoginFailedRewriteResult(result, sessionState)
             val body = result.body

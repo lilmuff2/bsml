@@ -15,9 +15,10 @@ object CsvPatchApplier {
                 left.compareTo(right)
             }
         }
-
+        
         keys.forEach { name ->
             val data = patch.getJSONObject(name)
+            val dataKeys = data.keysList()
             val rowIndex = table.names[name] ?: run {
                 val requestedIndex = if (data.has("@index")) data.getInt("@index") else table.rows.size
                 val inserted = table.insertDataRow(requestedIndex)
@@ -29,7 +30,7 @@ object CsvPatchApplier {
             }
 
             var rowCount = table.countRowsOfName(name)
-            data.keysList().forEach { columnName ->
+            dataKeys.forEach { columnName ->
                 if (columnName.startsWith("@")) return@forEach
                 val array = data.optJSONArray(columnName) ?: return@forEach
                 while (rowCount < array.length()) {
@@ -38,10 +39,13 @@ object CsvPatchApplier {
                 }
             }
 
-            data.keysList().forEach { columnName ->
+            dataKeys.forEach { columnName ->
                 if (columnName.startsWith("@")) return@forEach
-                val column = table.columns.indexOf(columnName)
-                if (column < 0) error("column not found: $columnName")
+                val column = table.columnIndexes[columnName] ?: -1
+                if (column < 0) {
+                    lilmuff1.bsml.state.VpnLogRepository.log("WARNING: Column '$columnName' not found in table columns, skipping.")
+                    return@forEach
+                }
                 val rawValue = data.get(columnName)
                 val values = if (rawValue is JSONArray) rawValue.valuesList() else listOf(rawValue)
                 for (rowOffset in 0 until rowCount) {

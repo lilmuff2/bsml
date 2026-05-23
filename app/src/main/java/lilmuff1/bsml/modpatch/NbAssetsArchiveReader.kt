@@ -13,30 +13,31 @@ object NbAssetsArchiveReader {
         val featureGroups: List<ImportedModFeatureGroup> = emptyList()
     )
 
-    fun readMetadata(archive: File): ImportedModMetadata {
-        ZipFile(archive).use { zip ->
-            val content = zip.getEntry(ROOT_CONTENT_JSON)
-                ?: return ImportedModMetadata()
-            val json = JSONObject(zip.getInputStream(content).use { it.readBytes().decodeToString() })
-            return ImportedModMetadata(
-                title = localizedText(json.opt("@title")),
-                description = localizedText(json.opt("@description")),
-                author = json.optString("@author", "").ifEmpty { null },
-                version = json.optString("@version", "").ifEmpty { null },
-                gameVersion = json.optInt("@gv").takeIf { json.has("@gv") }
-            )
-        }
+    fun readMetadata(source: File): ImportedModMetadata {
+        val json = runCatching { readRootContentJson(source) }.getOrNull() ?: return ImportedModMetadata()
+        return ImportedModMetadata(
+            title = localizedText(json.opt("@title")),
+            description = localizedText(json.opt("@description")),
+            author = json.optString("@author", "").ifEmpty { null },
+            version = json.optString("@version", "").ifEmpty { null },
+            gameVersion = json.optInt("@gv").takeIf { json.has("@gv") }
+        )
     }
 
-    fun readRootContentJson(archive: File): JSONObject {
-        ZipFile(archive).use { zip ->
+    fun readRootContentJson(source: File): JSONObject {
+        if (source.isDirectory) {
+            val file = File(source, ROOT_CONTENT_JSON)
+            if (!file.isFile) error("content.json not found")
+            return JSONObject(file.readText())
+        }
+        ZipFile(source).use { zip ->
             val entry = zip.getEntry(ROOT_CONTENT_JSON) ?: error("content.json not found")
             return JSONObject(zip.getInputStream(entry).use { it.readBytes().decodeToString() })
         }
     }
 
-    fun readManifest(archive: File): Manifest {
-        val root = readRootContentJson(archive)
+    fun readManifest(source: File): Manifest {
+        val root = readRootContentJson(source)
         val features = root.optJSONObject("@features")?.let { featuresJson ->
             featuresJson.keys().asSequence()
                 .mapNotNull { key ->

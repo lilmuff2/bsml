@@ -3,10 +3,10 @@ package lilmuff1.bsml.modpatch
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
 import android.util.Log
 import java.util.zip.ZipFile
-import lilmuff1.bsml.state.OriginalAssetsRepository
 import lilmuff1.bsml.state.PreparedModFile
 import lilmuff1.bsml.state.VpnLogRepository
 import org.json.JSONArray
@@ -31,66 +31,61 @@ class NbAssetsCompiler(
 
     fun compile(archive: File, outputDir: File, clearOutput: Boolean = true): List<PreparedModFile> {
         val startedAt = System.nanoTime()
-        VpnLogRepository.log("NBASSETS prepare start file=${archive.name}")
+        VpnLogRepository.log("NBASSETS prepare start file=${archive.name} clearOutput=$clearOutput")
         if (clearOutput && outputDir.exists()) outputDir.deleteRecursively()
         outputDir.mkdirs()
 
         val contentJson = NbAssetsArchiveReader.readRootContentJson(archive)
         val provider = OriginalAssetProvider(context, outputDir)
         val contentParts = buildContentParts(contentJson)
-        VpnLogRepository.log(
-            "NBASSETS compile enabledFeatures=${enabledFeatureIds.sorted()} activeParts=${contentParts.map { it.key ?: "<root>" }}"
-        )
         val activePatchFiles = contentParts.flatMap { patchFilePaths(it.json) }.toSet()
         val allPatchFiles = collectAllPatchFilePaths(contentJson)
         val activeRoots = contentParts.map { it.root }.toSet()
         val inactiveFeatureRoots = collectAllFeatureRoots(contentJson) - activeRoots
         val patchJson = JSONObject()
         val roots = LinkedHashSet<String>()
-        val prepared = LinkedHashMap<String, File>()
+        val prepared = LinkedHashMap<String, PreparedModFile>()
         var assetCount = 0
         var csvCount = 0
 
-        if (clearOutput) {
-            OriginalAssetsRepository.listFiles(context)
-                .filterNot { it.path.endsWith(".csv", ignoreCase = true) }
-                .forEach { sourceFile ->
-                    val output = File(outputDir, sourceFile.path.toFingerprintPath())
-                    output.parentFile?.mkdirs()
-                    context.contentResolver.openInputStream(sourceFile.uri)?.use { input ->
-                        output.outputStream().use { input.copyTo(it) }
-                    }
-                    prepared[sourceFile.path.toFingerprintPath()] = output
+        contentParts.forEach { part ->
+            roots += part.root
+            val partPatchFiles = patchFilePaths(part.json)
+            if (partPatchFiles.isEmpty()) {
+                mergeTables(patchJson, part.json)
+            } else {
+                partPatchFiles.forEach { patchPath ->
+                    val patch = JSONObject(readArchiveBytes(archive, patchPath).decodeToString())
+                    mergeTables(patchJson, patch)
                 }
+            }
         }
 
-        ZipFile(archive).use { zip ->
-            contentParts.forEach { part ->
-                roots += part.root
-                val partPatchFiles = patchFilePaths(part.json)
-                if (partPatchFiles.isEmpty()) {
-                    mergeTables(patchJson, part.json)
-                } else {
-                    partPatchFiles.forEach { patchPath ->
-                        val patchEntry = zip.getEntry(patchPath) ?: error("patch file not found: $patchPath")
-                        val patch = JSONObject(zip.getInputStream(patchEntry).use { it.readBytes().decodeToString() })
-                        mergeTables(patchJson, patch)
-                    }
-                }
-            }
-
-            zip.entries().asSequence().forEach { entry ->
-                if (entry.isDirectory) return@forEach
-                val path = normalizePath(entry.name)
-                val assetPath = archiveAssetPath(path, roots.toList(), allPatchFiles, inactiveFeatureRoots) ?: return@forEach
+        listArchiveFiles(archive).forEach { path ->
+            val assetPath = archiveAssetPath(path, roots.toList(), allPatchFiles, inactiveFeatureRoots) ?: return@forEach
+            prepared[assetPath] = if (archive.isDirectory) {
+                val sourceFile = File(archive, path)
+                PreparedModFile(
+                    path = assetPath,
+                    sha = sha1Hex(sourceFile.readBytes()),
+                    uri = Uri.fromFile(sourceFile).toString(),
+                    size = sourceFile.length(),
+                    lastModified = sourceFile.lastModified()
+                )
+            } else {
                 val output = File(outputDir, assetPath)
                 output.parentFile?.mkdirs()
-                zip.getInputStream(entry).use { input ->
-                    output.outputStream().use { input.copyTo(it) }
-                }
-                prepared[assetPath] = output
-                assetCount++
+                val bytes = readArchiveBytes(archive, path)
+                output.writeBytes(bytes)
+                PreparedModFile(
+                    path = assetPath,
+                    sha = sha1Hex(bytes),
+                    uri = Uri.fromFile(output).toString(),
+                    size = output.length(),
+                    lastModified = output.lastModified()
+                )
             }
+            assetCount++
         }
         val currentPatchJson = patchJson.toString()
         val mergedPatchJson = if (clearOutput) {
@@ -100,26 +95,29 @@ class NbAssetsCompiler(
         }
         lastMergedPatchJson = mergedPatchJson
         lastMergedPatchJsonFile(context).writeText(mergedPatchJson)
-        VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size}")
-
+        VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size} file=${archive.name}")
         patchJson.keysList()
             .sorted()
             .forEach { tableName ->
                 val tableStartedAt = System.nanoTime()
                 runCatching {
-                    VpnLogRepository.log("NBASSETS prepare csv start table=$tableName")
                     val patch = patchJson.optJSONObject(tableName) ?: return@forEach
                     val original = provider.resolveCsv(tableName)
-                    VpnLogRepository.log("NBASSETS prepare csv source table=$tableName path=${original.path} bytes=${original.bytes.size}")
                     val table = CsvTable.load(original.bytes)
                     val resolvedPatch = CsvPatchApplier.resolveWildcards(patch, table)
                     CsvPatchApplier.apply(table, resolvedPatch)
                     val output = File(outputDir, original.path)
                     output.parentFile?.mkdirs()
                     output.writeBytes(table.toCsvBytes())
-                    prepared[original.path] = output
+                    prepared[original.path] = PreparedModFile(
+                        path = original.path,
+                        sha = sha1Hex(output.readBytes()),
+                        uri = Uri.fromFile(output).toString(),
+                        size = output.length(),
+                        lastModified = output.lastModified()
+                    )
                     csvCount++
-                    VpnLogRepository.log("NBASSETS prepare csv table=$tableName path=${original.path} ms=${elapsedMs(tableStartedAt)}")
+                    VpnLogRepository.log("NBASSETS csv table=$tableName path=${original.path} ms=${elapsedMs(tableStartedAt)}")
                 }.getOrElse { error ->
                     VpnLogRepository.log(
                         "NBASSETS prepare csv failed table=$tableName error=${error::class.java.simpleName}: ${error.message ?: "unknown"}"
@@ -129,17 +127,7 @@ class NbAssetsCompiler(
                 }
             }
 
-        val result = prepared.entries
-            .sortedBy { it.key }
-            .map { (path, file) ->
-                PreparedModFile(
-                    path = path,
-                    sha = sha1Hex(file.readBytes()),
-                    uri = Uri.fromFile(file).toString(),
-                    size = file.length(),
-                    lastModified = file.lastModified()
-                )
-            }
+        val result = prepared.values.sortedBy { it.path }
         VpnLogRepository.log("NBASSETS prepare done files=${result.size} csv=$csvCount assets=$assetCount ms=${elapsedMs(startedAt)}")
         return result
     }
@@ -151,6 +139,7 @@ class NbAssetsCompiler(
         inactiveFeatureRoots: Set<String>
     ): String? {
         if (path.startsWith("META-INF/") || path.startsWith("build/")) return null
+        if (path == "metadata.json" || path == "feature_selection.json" || path == "mod_state.json") return null
         if (patchFiles.contains(path)) return null
         if (inactiveFeatureRoots.any { root -> path == root || path.startsWith("$root/") }) return null
 
@@ -180,6 +169,31 @@ class NbAssetsCompiler(
         return path.replace('\\', '/').trimStart('/')
     }
 
+    private fun listArchiveFiles(source: File): List<String> {
+        if (source.isDirectory) {
+            return source.walkTopDown()
+                .filter { it.isFile }
+                .map { it.relativeTo(source).invariantSeparatorsPath }
+                .toList()
+        }
+        ZipFile(source).use { zip ->
+            return zip.entries().asSequence()
+                .filterNot { it.isDirectory }
+                .map { it.name }
+                .toList()
+        }
+    }
+
+    private fun readArchiveBytes(source: File, path: String): ByteArray {
+        if (source.isDirectory) {
+            return File(source, path).readBytes()
+        }
+        ZipFile(source).use { zip ->
+            val entry = zip.getEntry(path) ?: error("file not found: $path")
+            return zip.getInputStream(entry).use { it.readBytes() }
+        }
+    }
+
     private fun String.toFingerprintPath(): String {
         return replace(" ", "")
     }
@@ -187,6 +201,17 @@ class NbAssetsCompiler(
     private fun sha1Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-1").digest(bytes)
         return digest.joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
+    }
+
+    private fun sha1Hex(input: InputStream): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        val buffer = ByteArray(256 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            digest.update(buffer, 0, read)
+        }
+        return digest.digest().joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
     }
 
     private fun JSONObject.keysList(): List<String> {

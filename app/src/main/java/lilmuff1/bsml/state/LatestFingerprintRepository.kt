@@ -33,6 +33,7 @@ data class LatestFingerprintState(
     val error: String? = null,
     val savedGameServer: String? = null,
     val savedRootSha: String? = null,
+    val savedGameVersion: Int? = null,
     val savedOriginsCount: Int = 0
 ) {
     val progress: Float
@@ -59,6 +60,7 @@ object LatestFingerprintRepository {
         val filesDir = context.filesDir
         val savedGameServer = readStoredGameServer(filesDir)
         val savedRootSha = readStoredClientHelloHash(filesDir)
+        val savedGameVersion = readStoredGameVersion(filesDir)
         val savedOriginsCount = readStoredOrigins(filesDir).size
         _state.value = _state.value.copy(
             isFetching = false,
@@ -68,6 +70,7 @@ object LatestFingerprintRepository {
             error = null,
             savedGameServer = savedGameServer,
             savedRootSha = savedRootSha,
+            savedGameVersion = savedGameVersion,
             savedOriginsCount = savedOriginsCount
         )
     }
@@ -75,13 +78,14 @@ object LatestFingerprintRepository {
     suspend fun fetchLatest(context: Context): Boolean = withContext(Dispatchers.IO) {
         val filesDir = context.filesDir
         val captureSettings = VpnLogRepository.captureSettingsNow()
+        val storedGameServer = readStoredGameServer(filesDir)
         val configuredTargets = if (captureSettings.filterByIp) {
             parseTargets(captureSettings.ipFilterText)
         } else {
             parseTargets(DEFAULT_CAPTURE_TARGETS)
         }
         val targets = buildList {
-            readStoredGameServer(filesDir)?.let(::add)
+            storedGameServer?.takeIf { it.isNotBlank() }?.let(::add)
             addAll(configuredTargets)
             if (isEmpty()) add(GAME_HOST)
         }.distinct()
@@ -110,7 +114,10 @@ object LatestFingerprintRepository {
                         ?: error("Failed to parse LOGIN_FAILED from $target")
                     val tail = LoginFailedTail.parse(parsed.suffix)
                     val fingerprintJson = extractFingerprintJson(parsed, tail)
-                        ?: error("Fingerprint not found in LOGIN_FAILED from $target")
+                    if (fingerprintJson == null) {
+                        logLoginFailedStructure(target, loginFailedBody.size, parsed, tail)
+                        error("Fingerprint not found in LOGIN_FAILED from $target")
+                    }
                     val rootSha = extractRootSha(fingerprintJson)
                         ?: error("Fingerprint root sha missing in LOGIN_FAILED from $target")
                     val origins = linkedSetOf<String>().apply {
@@ -228,6 +235,14 @@ object LatestFingerprintRepository {
         }.getOrNull()
     }
 
+    fun readStoredGameVersion(filesDir: File): Int? {
+        val file = File(filesDir, LAST_SERVER_FINGERPRINT_FILE)
+        if (!file.isFile) return null
+        return runCatching {
+            extractGameVersion(file.readText())
+        }.getOrNull()
+    }
+
     private fun setProgress(context: Context, step: Int, message: String) {
         _state.value = _state.value.copy(
             isFetching = true,
@@ -237,6 +252,7 @@ object LatestFingerprintRepository {
             error = null,
             savedGameServer = _state.value.savedGameServer,
             savedRootSha = _state.value.savedRootSha,
+            savedGameVersion = _state.value.savedGameVersion,
             savedOriginsCount = _state.value.savedOriginsCount
         )
         VpnLogRepository.setStatus(message)
@@ -296,10 +312,55 @@ object LatestFingerprintRepository {
         return inflateFingerprint(compressed)
     }
 
+    private fun logLoginFailedStructure(
+        target: String,
+        bodyLength: Int,
+        parsed: LoginFailedPrefix,
+        tail: LoginFailedTail?
+    ) {
+        val plainFingerprint = parsed.fingerprint?.trim()
+        val plainPreview = plainFingerprint
+            ?.take(80)
+            ?.replace('\n', ' ')
+            ?.replace('\r', ' ')
+        val tailUrls = tail?.contentDownloadUrls.orEmpty()
+        VpnLogRepository.log(
+            "SC latest fingerprint structure host=$target bodyLen=$bodyLength reason=${parsed.reason} reasonText=${parsed.reasonText ?: "<null>"} " +
+                "plainFingerprintLen=${plainFingerprint?.length ?: -1} plainFingerprintPreview=${plainPreview ?: "<null>"} " +
+                "tailCompressed=${tail?.compressedFingerprint?.size ?: -1} tailUrls=${tailUrls.size} contentUrl=${parsed.contentDownloadUrl ?: "<null>"}"
+        )
+        if (tailUrls.isNotEmpty()) {
+            VpnLogRepository.log("SC latest fingerprint structure urls=$tailUrls")
+        }
+    }
+
     private fun extractRootSha(fingerprintJson: String): String? {
         return runCatching {
             JSONObject(fingerprintJson).optString("sha", "").ifEmpty { null }
         }.getOrNull()
+    }
+
+    private fun extractGameVersion(fingerprintJson: String): Int? {
+        val keys = arrayOf("@gv", "gv", "gameVersion", "version")
+        for (key in keys) {
+            val pattern = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(\"[^\"]+\"|\\d+)")
+            pattern.findAll(fingerprintJson)
+                .lastOrNull()
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim('"')
+                ?.let(::parseVersionMajor)
+                ?.let { return it }
+        }
+        return null
+    }
+
+    private fun parseVersionMajor(value: Any?): Int? {
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> Regex("\\d+").find(value)?.value?.toIntOrNull()
+            else -> null
+        }
     }
 
     private fun inflateFingerprint(bytes: ByteArray): String? {

@@ -3,7 +3,10 @@ package lilmuff1.bsml.state
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.security.MessageDigest
+import java.security.cert.Certificate
 import java.util.UUID
+import java.util.jar.JarFile
 import java.util.zip.ZipFile
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,7 +18,8 @@ data class ImportedModMetadata(
     val description: String? = null,
     val author: String? = null,
     val version: String? = null,
-    val gameVersion: Int? = null
+    val gameVersion: Int? = null,
+    val isSignatureVerified: Boolean = false
 )
 
 data class ImportedModFeature(
@@ -71,36 +75,46 @@ data class ImportedModListItem(
     val featureSelection: ImportedModFeatureSelection = ImportedModFeatureSelection()
 )
 
+data class ImportModResult(
+    val success: Boolean,
+    val isSignatureVerified: Boolean = false
+)
+
 object ImportedModRepository {
     private const val IMPORTED_DIR = "imported_mods"
-    private const val MOD_ARCHIVE_FILE = "mod.nbassets"
     private const val MOD_METADATA_FILE = "metadata.json"
     private const val MOD_ICON_FILE = "icon.png"
     private const val MOD_FEATURE_SELECTION_FILE = "feature_selection.json"
     private const val MOD_STATE_FILE = "mod_state.json"
-    private const val SELECTED_MOD_FILE = "selected_mod.json"
+    private const val MOD_ORDER_FILE = "mod_order.json"
+    private val TRUSTED_SIGNER_SHA256 = setOf(
+        "d21ca0f43cf708c0e86f25234411e31b491f8a0dacf504052e2b63f0bc93e3c9",
+        "a997d4fa74c511f6550057fdb27832e823c5506f7e126b2127e4431f2da652cc",
+        "8581f53fedaa7eed752b8944bfb2ccdadfb55fe1124c391176f157b882176e7f"
+    )
 
     private val _state = MutableStateFlow(ImportedModState())
     val state = _state.asStateFlow()
 
     fun refreshState(context: Context) {
-        val allMods = listModDirs(context).mapNotNull { dir ->
-            val archive = archiveFile(dir)
-            if (!archive.isFile) return@mapNotNull null
-            if (!isValidArchive(archive)) {
+        val orderedIds = readModOrder(context)
+        val allMods = listModDirs(context)
+            .sortedWith(compareBy<File> { dir -> orderedIds.indexOf(dir.name).takeIf { it >= 0 } ?: Int.MAX_VALUE }.thenBy { it.name })
+            .mapNotNull { dir ->
+            if (!isValidArchive(dir)) {
                 dir.deleteRecursively()
                 return@mapNotNull null
             }
             val icon = iconFile(dir)
-            if (!icon.isFile) {
-                extractIcon(archive, icon)
+            if (!icon.isFile && !dir.isDirectory) {
+                extractIcon(dir, icon)
             }
             val metadata = readMetadata(dir)
-            val manifest = NbAssetsArchiveReader.readManifest(archive)
+            val manifest = NbAssetsArchiveReader.readManifest(dir)
             val selection = readFeatureSelection(dir, manifest.features, manifest.featureGroups)
             ImportedModListItem(
                 id = dir.name,
-                fileName = archive.name,
+                fileName = dir.name,
                 metadata = metadata,
                 isEnabled = readModEnabled(dir),
                 iconLastModified = icon.takeIf { it.isFile }?.lastModified() ?: 0L,
@@ -109,12 +123,11 @@ object ImportedModRepository {
                 featureSelection = selection
             )
         }
-        val selectedId = readSelectedModId(context)?.takeIf { id -> allMods.any { it.id == id } }
+        writeModOrder(context, allMods.map { it.id })
+        val selectedId = _state.value.selectedModId?.takeIf { id -> allMods.any { it.id == id } }
+            ?: allMods.firstOrNull { it.isEnabled }?.id
             ?: allMods.firstOrNull()?.id
         val selected = allMods.firstOrNull { it.id == selectedId }
-        if (selectedId != null) {
-            writeSelectedModId(context, selectedId)
-        }
         _state.value = ImportedModState(
             mods = allMods,
             selectedModId = selectedId,
@@ -132,12 +145,18 @@ object ImportedModRepository {
     fun hasActiveMod(context: Context): Boolean = listModDirs(context).isNotEmpty()
 
     fun activeArchiveFile(context: Context): File {
-        val selectedId = readSelectedModId(context) ?: return File(importedDir(context), MOD_ARCHIVE_FILE)
-        return archiveFile(File(importedDir(context), selectedId))
+        refreshState(context)
+        val selectedId = _state.value.mods.firstOrNull { it.isEnabled }?.id
+            ?: _state.value.mods.firstOrNull()?.id
+            ?: return importedDir(context)
+        return File(importedDir(context), selectedId)
     }
 
     fun activeIconFile(context: Context): File {
-        val selectedId = readSelectedModId(context) ?: return File(importedDir(context), MOD_ICON_FILE)
+        refreshState(context)
+        val selectedId = _state.value.mods.firstOrNull { it.isEnabled }?.id
+            ?: _state.value.mods.firstOrNull()?.id
+            ?: return File(importedDir(context), MOD_ICON_FILE)
         return iconFile(File(importedDir(context), selectedId))
     }
 
@@ -145,16 +164,41 @@ object ImportedModRepository {
 
     fun enabledArchives(context: Context): List<File> {
         refreshState(context)
-        return _state.value.mods.filter { it.isEnabled }.map { archiveFile(File(importedDir(context), it.id)) }
+        return _state.value.mods
+            .filter { it.isEnabled }
+            .asReversed()
+            .map { File(importedDir(context), it.id) }
     }
 
-    fun selectMod(context: Context, modId: String) {
-        writeSelectedModId(context, modId)
+    fun moveModUp(context: Context, modId: String) {
+        val order = readModOrder(context).toMutableList()
+        val index = order.indexOf(modId)
+        if (index <= 0) return
+        java.util.Collections.swap(order, index, index - 1)
+        writeModOrder(context, order)
+        ModFilesRepository.clearPreparedFiles(context)
         refreshState(context)
     }
 
+    fun moveModDown(context: Context, modId: String) {
+        val order = readModOrder(context).toMutableList()
+        val index = order.indexOf(modId)
+        if (index < 0 || index >= order.lastIndex) return
+        java.util.Collections.swap(order, index, index + 1)
+        writeModOrder(context, order)
+        ModFilesRepository.clearPreparedFiles(context)
+        refreshState(context)
+    }
+
+    fun selectMod(context: Context, modId: String) {
+        _state.value = _state.value.copy(selectedModId = modId)
+    }
+
     fun clear(context: Context) {
-        val selectedId = _state.value.selectedModId ?: readSelectedModId(context) ?: return
+        val selectedId = _state.value.selectedModId
+            ?: _state.value.mods.firstOrNull { it.isEnabled }?.id
+            ?: _state.value.mods.firstOrNull()?.id
+            ?: return
         clearStoredModDir(File(importedDir(context), selectedId))
         _state.value = ImportedModState()
         ModFilesRepository.clearPreparedFiles(context)
@@ -171,14 +215,11 @@ object ImportedModRepository {
         dir.deleteRecursively()
     }
 
-    fun importMod(context: Context, uri: Uri): Boolean {
+    fun importMod(context: Context, uri: Uri): ImportModResult {
         return runCatching {
             val dir = importedDir(context)
             dir.mkdirs()
             val tempArchive = File(dir, "import_candidate.nbassets")
-            val modDir = File(dir, UUID.randomUUID().toString())
-            modDir.mkdirs()
-            val archive = archiveFile(modDir)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 tempArchive.outputStream().use { output ->
                     input.copyTo(output)
@@ -191,24 +232,33 @@ object ImportedModRepository {
                 error("invalid_nbassets_archive")
             }
 
-            tempArchive.copyTo(archive, overwrite = true)
+            val signatureVerified = verifyJarSignature(tempArchive)
+            val modificationId = readModificationId(tempArchive) ?: UUID.randomUUID().toString()
+            val modDir = File(dir, modificationId)
+            if (modDir.exists()) {
+                modDir.deleteRecursively()
+            }
+            modDir.mkdirs()
+            unzipToDirectory(tempArchive, modDir)
             tempArchive.delete()
-            val metadata = NbAssetsArchiveReader.readMetadata(archive)
-            val manifest = NbAssetsArchiveReader.readManifest(archive)
+            val metadata = NbAssetsArchiveReader.readMetadata(modDir)
+                .copy(isSignatureVerified = signatureVerified)
+            val manifest = NbAssetsArchiveReader.readManifest(modDir)
             writeMetadata(modDir, metadata)
             writeModEnabled(modDir, true)
             val selection = defaultSelection(manifest.features, manifest.featureGroups)
             writeFeatureSelection(modDir, selection)
             val icon = iconFile(modDir)
-            extractIcon(archive, icon)
-            writeSelectedModId(context, modDir.name)
+            writeModOrder(context, readModOrder(context).filterNot { it == modDir.name } + modDir.name)
             ModFilesRepository.clearPreparedFiles(context)
             refreshState(context)
-            true
+            _state.value = _state.value.copy(selectedModId = modDir.name)
+            VpnLogRepository.log("NBASSETS import modId=${modDir.name} signatureVerified=$signatureVerified")
+            ImportModResult(success = true, isSignatureVerified = signatureVerified)
         }.getOrElse { error ->
             ModFilesRepository.clearPreparedFiles(context)
             _state.value = _state.value.copy(error = error.message ?: error::class.java.simpleName)
-            false
+            ImportModResult(success = false)
         }
     }
 
@@ -220,8 +270,6 @@ object ImportedModRepository {
         return modDirsRoot(context).listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
     }
 
-    private fun archiveFile(modDir: File): File = File(modDir, MOD_ARCHIVE_FILE)
-
     private fun iconFile(modDir: File): File = File(modDir, MOD_ICON_FILE)
 
     private fun metadataFile(modDir: File): File = File(modDir, MOD_METADATA_FILE)
@@ -230,7 +278,7 @@ object ImportedModRepository {
 
     private fun modStateFile(modDir: File): File = File(modDir, MOD_STATE_FILE)
 
-    private fun selectedModFile(context: Context): File = File(importedDir(context), SELECTED_MOD_FILE)
+    private fun modOrderFile(context: Context): File = File(importedDir(context), MOD_ORDER_FILE)
 
     private fun writeMetadata(modDir: File, metadata: ImportedModMetadata) {
         val json = JSONObject()
@@ -239,6 +287,7 @@ object ImportedModRepository {
             .put("author", metadata.author)
             .put("version", metadata.version)
             .put("gameVersion", metadata.gameVersion)
+            .put("isSignatureVerified", metadata.isSignatureVerified)
         metadataFile(modDir).writeText(json.toString())
     }
 
@@ -252,7 +301,12 @@ object ImportedModRepository {
                 description = json.optString("description", "").ifEmpty { null },
                 author = json.optString("author", "").ifEmpty { null },
                 version = json.optString("version", "").ifEmpty { null },
-                gameVersion = json.optInt("gameVersion").takeIf { json.has("gameVersion") }
+                gameVersion = json.optInt("gameVersion").takeIf { json.has("gameVersion") },
+                isSignatureVerified = if (json.has("isSignatureVerified")) {
+                    json.optBoolean("isSignatureVerified", false)
+                } else {
+                    true
+                }
             )
         }.getOrNull()
     }
@@ -396,7 +450,10 @@ object ImportedModRepository {
     }
 
     private fun selectedModDir(context: Context): File? {
-        val id = _state.value.selectedModId ?: readSelectedModId(context) ?: return null
+        val id = _state.value.selectedModId
+            ?: _state.value.mods.firstOrNull { it.isEnabled }?.id
+            ?: _state.value.mods.firstOrNull()?.id
+            ?: return null
         return File(importedDir(context), id).takeIf { it.isDirectory }
     }
 
@@ -405,14 +462,26 @@ object ImportedModRepository {
         return _state.value.mods.firstOrNull { it.id == modId }
     }
 
-    private fun readSelectedModId(context: Context): String? {
-        val file = selectedModFile(context)
-        if (!file.isFile) return null
-        return runCatching { JSONObject(file.readText()).optString("id", "").ifEmpty { null } }.getOrNull()
+    private fun readModOrder(context: Context): List<String> {
+        val file = modOrderFile(context)
+        if (!file.isFile) return emptyList()
+        return runCatching {
+            val array = JSONObject(file.readText()).optJSONArray("order")
+            buildList {
+                if (array != null) {
+                    for (index in 0 until array.length()) {
+                        array.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
     }
 
-    private fun writeSelectedModId(context: Context, modId: String) {
-        selectedModFile(context).writeText(JSONObject().put("id", modId).toString())
+    private fun writeModOrder(context: Context, order: List<String>) {
+        val unique = order.distinct()
+        val array = org.json.JSONArray().apply { unique.forEach(::put) }
+        modOrderFile(context).parentFile?.mkdirs()
+        modOrderFile(context).writeText(JSONObject().put("order", array).toString())
     }
 
     private fun defaultSelection(
@@ -528,31 +597,127 @@ object ImportedModRepository {
 
     private fun isValidArchive(archive: File): Boolean {
         return runCatching {
-            ZipFile(archive).use { zip ->
-                zip.getEntry("content.json") ?: return@runCatching false
+            if (archive.isDirectory) {
+                File(archive, "content.json").isFile
+            } else {
+                ZipFile(archive).use { zip ->
+                    zip.getEntry("content.json") ?: return@runCatching false
+                }
             }
             NbAssetsArchiveReader.readRootContentJson(archive)
             true
         }.getOrDefault(false)
     }
 
-    private fun extractIcon(archive: File, output: File) {
+    private fun readModificationId(archive: File): String? {
+        return runCatching {
+            JarFile(archive, false).use { jar ->
+                jar.manifest?.mainAttributes
+                    ?.getValue("Modification-Id")
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let(::normalizeModificationId)
+            }
+        }.getOrNull()
+    }
+
+    private fun normalizeModificationId(value: String): String {
+        return value.filter { char ->
+            char.isLetterOrDigit() || char == '-' || char == '_'
+        }.ifEmpty { UUID.randomUUID().toString() }
+    }
+
+    private fun verifyJarSignature(archive: File): Boolean {
+        return runCatching {
+            JarFile(archive, true).use { jar ->
+                val buffer = ByteArray(32 * 1024)
+                val signerCertificates = LinkedHashSet<Certificate>()
+                val entries = jar.entries().asSequence()
+                    .filterNot { it.isDirectory }
+                    .filterNot { it.name.replace('\\', '/').startsWith("META-INF/") }
+                    .toList()
+                if (entries.isEmpty()) return@runCatching false
+                entries.forEach { entry ->
+                    jar.getInputStream(entry).use { input ->
+                        while (input.read(buffer) != -1) {
+                            // Reading the whole stream forces JarFile signature verification.
+                        }
+                    }
+                    if (entry.codeSigners.isNullOrEmpty()) {
+                        return@runCatching false
+                    }
+                    entry.codeSigners.orEmpty().forEach { signer ->
+                        signer.signerCertPath.certificates.forEach(signerCertificates::add)
+                    }
+                }
+                val signerFingerprints = signerCertificates.map(::certificateSha256).toSet()
+                val trusted = signerFingerprints.any { it in TRUSTED_SIGNER_SHA256 }
+                if (!trusted) {
+                    VpnLogRepository.log("NBASSETS signature untrusted certs=${signerFingerprints.sorted()}")
+                }
+                trusted
+            }
+        }.getOrElse { error ->
+            VpnLogRepository.log("NBASSETS signature verify failed ${error::class.java.simpleName}: ${error.message ?: "unknown"}")
+            false
+        }
+    }
+
+    private fun certificateSha256(certificate: Certificate): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
+        return digest.joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
+    }
+
+    private fun extractIcon(source: File, output: File) {
+        if (source.isDirectory && output == File(source, "icon.png")) {
+            return
+        }
         output.delete()
         runCatching {
-            ZipFile(archive).use { zip ->
-                val entry = zip.entries().asSequence().firstOrNull {
-                    it.name.replace('\\', '/').trimStart('/').equals("icon.png", ignoreCase = true)
-                } ?: run {
+            if (source.isDirectory) {
+                val icon = File(source, "icon.png")
+                if (!icon.isFile) {
                     VpnLogRepository.log("NBASSETS icon not found")
                     return
                 }
-                zip.getInputStream(entry).use { input ->
-                    output.outputStream().use { input.copyTo(it) }
+                icon.copyTo(output, overwrite = true)
+                VpnLogRepository.log("NBASSETS icon saved entry=icon.png bytes=${output.length()}")
+            } else {
+                ZipFile(source).use { zip ->
+                    val entry = zip.entries().asSequence().firstOrNull {
+                        it.name.replace('\\', '/').trimStart('/').equals("icon.png", ignoreCase = true)
+                    } ?: run {
+                        VpnLogRepository.log("NBASSETS icon not found")
+                        return
+                    }
+                    zip.getInputStream(entry).use { input ->
+                        output.outputStream().use { input.copyTo(it) }
+                    }
+                    VpnLogRepository.log("NBASSETS icon saved entry=${entry.name} bytes=${output.length()}")
                 }
-                VpnLogRepository.log("NBASSETS icon saved entry=${entry.name} bytes=${output.length()}")
             }
         }.getOrElse { error ->
             VpnLogRepository.log("NBASSETS icon failed error=${error::class.java.simpleName}: ${error.message ?: "unknown"}")
+        }
+    }
+
+    private fun unzipToDirectory(archive: File, outputDir: File) {
+        ZipFile(archive).use { zip ->
+            zip.entries().asSequence().forEach { entry ->
+                val normalized = entry.name.replace('\\', '/').trimStart('/')
+                if (normalized.startsWith("META-INF/") || normalized.startsWith("build/")) {
+                    return@forEach
+                }
+                val output = File(outputDir, normalized)
+                if (entry.isDirectory) {
+                    output.mkdirs()
+                } else {
+                    output.parentFile?.mkdirs()
+                    zip.getInputStream(entry).use { input ->
+                        output.outputStream().use { input.copyTo(it) }
+                    }
+                }
+            }
         }
     }
 

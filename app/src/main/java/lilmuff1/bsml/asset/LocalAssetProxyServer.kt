@@ -11,10 +11,13 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import lilmuff1.bsml.config.LOCAL_ASSET_HOST
 import lilmuff1.bsml.config.LOCAL_ASSET_PORT
 import lilmuff1.bsml.config.PATCH_NAMESPACE
+import lilmuff1.bsml.config.externalAssetBaseUrl
 import lilmuff1.bsml.config.localAssetBaseUrl
 
 class LocalAssetProxyServer(
@@ -25,6 +28,7 @@ class LocalAssetProxyServer(
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
+    private var clientExecutor: ExecutorService? = null
 
     @Volatile
     private var running = false
@@ -67,11 +71,15 @@ class LocalAssetProxyServer(
         socket.bind(InetSocketAddress(LOCAL_ASSET_HOST, LOCAL_ASSET_PORT))
         serverSocket = socket
         running = true
+        val executor = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "bsml-asset-proxy-client")
+        }
+        clientExecutor = executor
         acceptThread = thread(name = "bsml-asset-proxy-accept", start = true) {
             while (running) {
                 try {
                     val client = socket.accept()
-                    thread(name = "bsml-asset-proxy-client", start = true) {
+                    executor.submit {
                         handleClient(client)
                     }
                 } catch (_: IOException) {
@@ -90,6 +98,8 @@ class LocalAssetProxyServer(
         serverSocket = null
         acceptThread?.interrupt()
         acceptThread = null
+        clientExecutor?.shutdownNow()
+        clientExecutor = null
     }
 
     private fun handleClient(client: Socket) {
@@ -135,8 +145,8 @@ class LocalAssetProxyServer(
         val patchedAsset = openPatchedAsset(assetPath)
         if (patchedAsset != null) {
             onPatchedAssetServed(assetPath)
-            onLog("ASSET $method $path normalized=$assetPath result=patched bytes=${patchedAsset.length}")
             writePatchedAssetResponse(method, assetPath, patchedAsset, output)
+            onLog("ASSET $method $path normalized=$assetPath result=patched code=200 bytes=${patchedAsset.length}")
             return
         }
 
@@ -289,7 +299,7 @@ class LocalAssetProxyServer(
     private fun rewriteLocationHeader(value: String): String {
         var rewritten = value
         origins.forEach { origin ->
-            rewritten = rewritten.replace(origin, localAssetBaseUrl())
+            rewritten = rewritten.replace(origin, externalAssetBaseUrl())
         }
         return rewritten
     }

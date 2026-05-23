@@ -124,22 +124,30 @@ object ModFilesRepository {
 
     suspend fun prepareFiles(context: Context): Boolean = prepareMutex.withLock {
         withContext(Dispatchers.IO) {
+            val startedAt = System.nanoTime()
             if (LatestFingerprintStore.readStoredClientHelloHash(context.filesDir).isNullOrBlank()) {
                 _preparation.value = _preparation.value.copy(
                     isPreparing = false,
                     isReady = false,
                     error = "fingerprint_not_loaded"
                 )
+                VpnLogRepository.log("PREPARE abort fingerprint_not_loaded")
                 return@withContext false
             }
             val enabledArchives = ImportedModRepository.enabledArchives(context)
             if (enabledArchives.isNotEmpty()) {
+                VpnLogRepository.log("PREPARE mode=imported enabledMods=${enabledArchives.size}")
                 return@withContext prepareImportedArchives(context, enabledArchives)
+            }
+            if (ImportedModRepository.hasActiveMod(context)) {
+                VpnLogRepository.log("PREPARE mode=original-assets-only importedModsPresent=true enabledMods=0")
+                return@withContext prepareOriginalAssetsOnly(context)
             }
 
             val folderName = getDisplayName(context)
             if (folderName == null) {
                 _preparation.value = ModPreparationState(error = "folder_not_selected")
+                VpnLogRepository.log("PREPARE abort folder_not_selected")
                 return@withContext false
             }
 
@@ -163,6 +171,7 @@ object ModFilesRepository {
                     isReady = existingPreparedList.isNotEmpty(),
                     error = null
                 )
+                VpnLogRepository.log("PREPARE snapshot matched count=${existingPreparedList.size} ms=${elapsedMs(startedAt)}")
                 return@withContext existingPreparedList.isNotEmpty()
             }
 
@@ -223,6 +232,7 @@ object ModFilesRepository {
                     isReady = false,
                     error = sourceFiles[failedIndex].path
                 )
+                VpnLogRepository.log("PREPARE failed path=${sourceFiles[failedIndex].path} ms=${elapsedMs(startedAt)}")
                 return@withContext false
             }
 
@@ -235,6 +245,7 @@ object ModFilesRepository {
                 isReady = true,
                 error = null
             )
+            VpnLogRepository.log("PREPARE done files=${preparedFiles.size} ms=${elapsedMs(startedAt)}")
             LoginFailedRewritePrewarmer.prewarm(context)
             true
         }
@@ -289,8 +300,16 @@ object ModFilesRepository {
     fun openPreparedFile(context: Context, relativePath: String): ByteArray? {
         val entry = findPreparedFile(context, relativePath) ?: return null
         return runCatching {
-            context.contentResolver.openInputStream(Uri.parse(entry.uri))?.use { it.readBytes() }
+            openPreparedInputStream(context, Uri.parse(entry.uri))?.use { it.readBytes() }
         }.getOrNull()
+    }
+
+    fun openPreparedInputStream(context: Context, uri: Uri): java.io.InputStream? {
+        return if (uri.scheme == "file") {
+            uri.path?.let { File(it).inputStream() }
+        } else {
+            context.contentResolver.openInputStream(uri)
+        }
     }
 
     fun takePersistablePermission(context: Context, uri: Uri) {
@@ -314,6 +333,7 @@ object ModFilesRepository {
     }
 
     private suspend fun prepareImportedArchives(context: Context, archives: List<File>): Boolean = withContext(Dispatchers.IO) {
+        val startedAt = System.nanoTime()
         ImportedModRepository.refreshState(context)
         val imported = ImportedModRepository.state.value
         val folderName = imported.metadata?.title ?: imported.fileName ?: archives.first().name
@@ -326,18 +346,27 @@ object ModFilesRepository {
             error = null
         )
         runCatching {
-            VpnLogRepository.log("NBASSETS prepare imported mods=${archives.size}")
+            VpnLogRepository.log(
+                "NBASSETS prepare imported mods=${archives.size} order=${archives.map { it.name }}"
+            )
             val outputDir = File(context.filesDir, PREPARED_FILES_DIR)
             outputDir.deleteRecursively()
             val preparedMap = LinkedHashMap<String, PreparedModFile>()
+            val importedModsById = imported.mods.associateBy { it.id }
+            preloadOriginalAssetsIntoPreparedMap(
+                context = context,
+                folderName = folderName,
+                preparedMap = preparedMap,
+                startedAt = startedAt
+            )
             archives.forEachIndexed { index, archive ->
-                val modId = archive.parentFile?.name ?: return@forEachIndexed
-                ImportedModRepository.selectMod(context, modId)
-                val currentImported = ImportedModRepository.state.value
+                val modId = archive.name
+                val currentImported = importedModsById[modId] ?: return@forEachIndexed
                 VpnLogRepository.log(
                     "NBASSETS prepare imported mod=${currentImported.fileName} enabled=${currentImported.isEnabled} selected=${currentImported.featureSelection.enabledFeatureIds.sorted()}"
                 )
                 if (!currentImported.isEnabled) return@forEachIndexed
+                val beforeKeys = preparedMap.keys.toSet()
                 val prepared = NbAssetsCompiler(
                     context = context,
                     enabledFeatureIds = currentImported.featureSelection.enabledFeatureIds
@@ -346,7 +375,20 @@ object ModFilesRepository {
                     outputDir = outputDir,
                     clearOutput = index == 0
                 )
-                prepared.forEach { preparedMap[it.path] = it }
+                var added = 0
+                var replaced = 0
+                prepared.forEach {
+                    if (it.path in preparedMap) {
+                        replaced++
+                    } else {
+                        added++
+                    }
+                    preparedMap[it.path] = it
+                }
+                val changedPaths = prepared.map { it.path }.filter { it in beforeKeys }
+                VpnLogRepository.log(
+                    "NBASSETS prepare overlay mod=${currentImported.fileName} added=$added replaced=$replaced replacedPaths=${changedPaths.take(10)}"
+                )
             }
             val prepared = preparedMap.values.sortedBy { it.path }
             writePreparedIndex(context, prepared)
@@ -358,6 +400,7 @@ object ModFilesRepository {
                 isReady = prepared.isNotEmpty(),
                 error = null
             )
+            VpnLogRepository.log("NBASSETS prepare imported done files=${prepared.size} ms=${elapsedMs(startedAt)}")
             LoginFailedRewritePrewarmer.prewarm(context)
             prepared.isNotEmpty()
         }.getOrElse { error ->
@@ -372,8 +415,148 @@ object ModFilesRepository {
                 isReady = false,
                 error = error.message ?: error::class.java.simpleName
             )
+            VpnLogRepository.log("NBASSETS prepare imported abort ms=${elapsedMs(startedAt)}")
             false
         }
+    }
+
+    private suspend fun preloadOriginalAssetsIntoPreparedMap(
+        context: Context,
+        folderName: String,
+        preparedMap: MutableMap<String, PreparedModFile>,
+        startedAt: Long
+    ) {
+        val sourceStartedAt = System.nanoTime()
+        val sourceFiles = OriginalAssetsRepository.listFiles(context)
+        VpnLogRepository.log("PREPARE source-folder preload sourceCount=${sourceFiles.size}")
+        if (sourceFiles.isEmpty()) return
+
+        _preparation.value = ModPreparationState(
+            folderName = folderName,
+            isPreparing = true,
+            preparedCount = 0,
+            totalCount = sourceFiles.size,
+            isReady = false,
+            error = null
+        )
+
+        val completedCount = AtomicInteger(0)
+        val preparedFiles = coroutineScope {
+            sourceFiles.map { file ->
+                async(prepareDispatcher) {
+                    val sha = runCatching {
+                        context.contentResolver.openInputStream(file.uri)?.use(::sha1Hex)
+                    }.getOrNull()
+                    val completed = completedCount.incrementAndGet()
+                    _preparation.value = ModPreparationState(
+                        folderName = folderName,
+                        isPreparing = true,
+                        preparedCount = completed,
+                        totalCount = sourceFiles.size,
+                        isReady = false,
+                        error = null
+                    )
+                    sha?.let {
+                        PreparedModFile(
+                            path = normalizePath(file.path),
+                            sha = it,
+                            uri = file.uri.toString(),
+                            size = file.size,
+                            lastModified = file.lastModified
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+
+        val failedIndex = preparedFiles.indexOfFirst { it == null }
+        if (failedIndex >= 0) {
+            error("source_asset_read_failed:${sourceFiles[failedIndex].path}")
+        }
+        preparedFiles.filterNotNull().forEach { preparedMap[it.path] = it }
+        VpnLogRepository.log(
+            "PREPARE source-folder preload done files=${preparedFiles.size} ms=${elapsedMs(sourceStartedAt)} totalMs=${elapsedMs(startedAt)}"
+        )
+    }
+
+    private suspend fun prepareOriginalAssetsOnly(context: Context): Boolean = withContext(Dispatchers.IO) {
+        val startedAt = System.nanoTime()
+        val folderName = OriginalAssetsRepository.state.value.folderName ?: "Папка ассетов"
+        _preparation.value = ModPreparationState(
+            folderName = folderName,
+            isPreparing = true,
+            preparedCount = 0,
+            totalCount = 0,
+            isReady = false,
+            error = null
+        )
+        val sourceFiles = OriginalAssetsRepository.listFiles(context)
+        VpnLogRepository.log("PREPARE original-assets-only sourceCount=${sourceFiles.size}")
+        if (sourceFiles.isEmpty()) {
+            clearPreparedFiles(context)
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = false,
+                preparedCount = 0,
+                totalCount = 0,
+                isReady = false,
+                error = null
+            )
+            VpnLogRepository.log("PREPARE original-assets-only empty ms=${elapsedMs(startedAt)}")
+            return@withContext false
+        }
+        val completedCount = AtomicInteger(0)
+        val preparedFiles = coroutineScope {
+            sourceFiles.map { file ->
+                async(prepareDispatcher) {
+                    val sha = context.contentResolver.openInputStream(file.uri)?.use(::sha1Hex)
+                    val completed = completedCount.incrementAndGet()
+                    _preparation.value = ModPreparationState(
+                        folderName = folderName,
+                        isPreparing = true,
+                        preparedCount = completed,
+                        totalCount = sourceFiles.size,
+                        isReady = false,
+                        error = null
+                    )
+                    if (sha == null) {
+                        null
+                    } else {
+                        PreparedModFile(
+                            path = normalizePath(file.path),
+                            sha = sha,
+                            uri = file.uri.toString(),
+                            size = file.size,
+                            lastModified = file.lastModified
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+        val failedIndex = preparedFiles.indexOfFirst { it == null }
+        if (failedIndex >= 0) {
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = false,
+                preparedCount = failedIndex,
+                totalCount = sourceFiles.size,
+                isReady = false,
+                error = sourceFiles[failedIndex].path
+            )
+            VpnLogRepository.log("PREPARE original-assets-only failed path=${sourceFiles[failedIndex].path} ms=${elapsedMs(startedAt)}")
+            return@withContext false
+        }
+        writePreparedIndex(context, preparedFiles.filterNotNull())
+        _preparation.value = ModPreparationState(
+            folderName = folderName,
+            isPreparing = false,
+            preparedCount = preparedFiles.size,
+            totalCount = preparedFiles.size,
+            isReady = preparedFiles.isNotEmpty(),
+            error = null
+        )
+        VpnLogRepository.log("PREPARE original-assets-only done files=${preparedFiles.size} ms=${elapsedMs(startedAt)}")
+        return@withContext preparedFiles.isNotEmpty()
     }
 
     private fun writePreparedIndex(context: Context, files: List<PreparedModFile>) {
@@ -516,3 +699,7 @@ private object IntentFlags {
 
 private const val COPY_BUFFER_SIZE = 256 * 1024
 private const val PREPARE_FILE_PARALLELISM = 4
+
+private fun elapsedMs(startedAtNanos: Long): String {
+    return String.format(java.util.Locale.US, "%.3f", (System.nanoTime() - startedAtNanos) / 1_000_000.0)
+}
