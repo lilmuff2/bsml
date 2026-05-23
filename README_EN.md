@@ -12,10 +12,11 @@ BSML works as a local VPN and asset proxy. It intercepts the game asset update f
 
 ```mermaid
 sequenceDiagram
+    participant CDN as Local Asset Proxy
     actor Game as Game Client
     participant Proxy as BSML VPN Proxy
     participant Server as Game Server
-    participant CDN as Local Asset Proxy
+    
 
     Game->>Proxy: 1. CLIENT_HELLO (original asset hash)
     Note over Proxy: Replace content hash with a BSML hash
