@@ -84,8 +84,8 @@ object LatestFingerprintRepository {
         val captureSettings = VpnLogRepository.captureSettingsNow()
         val storedGameServer = readStoredGameServer(filesDir)
         val isChinaMode = isChinaCapture(captureSettings)
-        val clientVersion = parseClientVersion(VpnLogRepository.lastClientVersionNow())
-            ?: FetchClientVersion(0, 0, 0)
+        val versionStr = VpnLogRepository.lastClientVersionNow() ?: getInstalledGameVersionName(context)
+        val clientVersion = parseClientVersion(versionStr) ?: FetchClientVersion(55, 228, 1)
         val configuredTargets = if (captureSettings.filterByIp) {
             parseTargets(captureSettings.ipFilterText)
         } else if (isChinaMode) {
@@ -327,14 +327,41 @@ object LatestFingerprintRepository {
         return writer.toByteArray()
     }
 
+    private fun getInstalledGameVersionName(context: Context): String? {
+        val captureSettings = VpnLogRepository.captureSettingsNow()
+        val packages = buildList {
+            captureSettings.autoLaunchPackage?.let { add(it) }
+            captureSettings.packageText.split(',', ' ', '\n', '\r', '\t')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .forEach { add(it) }
+        }.distinct()
+        
+        for (pkg in packages) {
+            try {
+                val info = context.packageManager.getPackageInfo(pkg, 0)
+                val version = info.versionName?.trim()
+                if (!version.isNullOrEmpty()) {
+                    return version
+                }
+            } catch (_: Throwable) {
+                // package not installed, try next one
+            }
+        }
+        return null
+    }
+
     private fun parseClientVersion(value: String?): FetchClientVersion? {
         val parts = value
             ?.trim()
             ?.split('.', '-', '_')
             ?.mapNotNull { it.toIntOrNull() }
             ?: return null
-        if (parts.size < 3) return null
-        return FetchClientVersion(parts[0], parts[1], parts[2])
+        if (parts.isEmpty()) return null
+        val major = parts.getOrNull(0) ?: 0
+        val revision = parts.getOrNull(1) ?: 0
+        val build = parts.getOrNull(2) ?: 0
+        return FetchClientVersion(major, revision, build)
     }
 
     private fun readLoginFailedBody(input: java.io.InputStream): ByteArray? {
