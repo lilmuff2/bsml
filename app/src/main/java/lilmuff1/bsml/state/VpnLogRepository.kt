@@ -246,6 +246,8 @@ object VpnLogRepository {
         updatePreference(context) { putString(KEY_LAST_CLIENT_VERSION, normalized) }
     }
 
+    fun lastClientVersionNow(): String? = _lastClientVersion.value
+
     fun setShowReinstallWarningAfterDelete(isEnabled: Boolean) {
         _showReinstallWarningAfterDelete.value = isEnabled
     }

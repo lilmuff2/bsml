@@ -10,6 +10,7 @@ import java.util.ArrayDeque
 import kotlin.concurrent.thread
 import kotlin.math.min
 import kotlin.random.Random
+import lilmuff1.bsml.config.LOCAL_ASSET_PORT
 import lilmuff1.bsml.config.PATCH_NAMESPACE
 import lilmuff1.bsml.config.localAssetBaseUrl
 import lilmuff1.bsml.protocol.*
@@ -52,6 +53,7 @@ class TcpProxySession(
         localhostAssetBaseUrl = localAssetBaseUrl()
     )
     private val serverMessageBuffer = ByteQueue()
+    private val isSupercellProtocol = key.serverPort != LOCAL_ASSET_PORT
     private val serverInitialSeq = Random.nextLong(1, Int.MAX_VALUE.toLong())
 
     @Volatile
@@ -173,10 +175,14 @@ class TcpProxySession(
         if (closed) return
         if (!remoteConnected) return
 
-        val outgoingPayload = rewriteClientPayload(
-            payload = payload,
-            shouldRewriteContentHash = callbacks.shouldRewriteContentHash()
-        )
+        val outgoingPayload = if (isSupercellProtocol) {
+            rewriteClientPayload(
+                payload = payload,
+                shouldRewriteContentHash = callbacks.shouldRewriteContentHash()
+            )
+        } else {
+            payload
+        }
         if (outgoingPayload == null) {
             debugLog("Client payload consumed locally size=${payload.size}")
             sendAck()
@@ -310,7 +316,9 @@ class TcpProxySession(
                     writeFullyToRemote(channel, payload)
                     debugLog("Remote write done size=${payload.size}")
                     sendAck()
-                    logClientPayload(payload)
+                    if (isSupercellProtocol) {
+                        logClientPayload(payload)
+                    }
                 } catch (_: InterruptedException) {
                     closeReason = "remote-writer-interrupted"
                     close()
@@ -357,7 +365,11 @@ class TcpProxySession(
                     val chunk = ByteArray(read)
                     buffer.get(chunk)
                     debugLog("Remote read size=$read for ${key.clientPort}")
-                    handleServerBytes(chunk)
+                    if (isSupercellProtocol) {
+                        handleServerBytes(chunk)
+                    } else {
+                        sendPayloadFromServer(chunk)
+                    }
                 }
                 debugLog("Remote EOF for ${key.clientPort}")
             } catch (_: InterruptedException) {

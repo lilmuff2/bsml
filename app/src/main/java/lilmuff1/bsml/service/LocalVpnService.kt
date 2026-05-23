@@ -533,6 +533,22 @@ class LocalVpnService : VpnService() {
             return LoginFailedRewriteResult(body, FingerprintHashes(null, null), FingerprintPatchStats())
         }
         val currentClientHash = InstallFlowRepository.getCurrentClientHelloHash()
+        if (!cleanupModeEnabled && shouldAbortInstallForPreparedHash(currentClientHash)) {
+            InstallFlowRepository.disableContentHashRewrite()
+            VpnLogRepository.log(
+                "SC install aborted preparedRootSha=${ModFilesRepository.readPreparedRootSha(appContext)} clientHash=${currentClientHash ?: "<null>"}"
+            )
+            val result = loginFailedRewriter.rewriteCleanup(
+                body = body,
+                reasonCode = 1,
+                reasonName = "LOGIN_FAILED",
+                reasonText = getString(R.string.message_refresh_files_before_install),
+                forceRewriteFingerprint = false,
+                thoroughCleanup = false
+            )
+            handleLoginFailedRewriteResult(result, sessionState)
+            return result
+        }
         val currentHashAlreadyPatched = currentClientHash?.startsWith(PATCH_NAMESPACE) == true
         val shouldPatchRootFingerprintSha = ROOT_SHA_REWRITE_ENABLED &&
             !InstallFlowRepository.wasRootShaRewriteApplied() &&
@@ -635,6 +651,35 @@ class LocalVpnService : VpnService() {
         }
         if (InstallFlowRepository.wasFinalClientHelloSeen()) return null
         val isPatchedHash = contentHash.startsWith(PATCH_NAMESPACE)
+        if (!isPatchedHash && shouldAbortInstallForPreparedHash(contentHash)) {
+            val cached = loadInstallLoginFailedTemplate(contentHash) ?: return null
+            val version = cached.version
+            val rewriteStartedAt = System.nanoTime()
+            InstallFlowRepository.disableContentHashRewrite()
+            VpnLogRepository.log(clientHelloLog)
+            VpnLogRepository.log(
+                "SC install aborted preparedRootSha=${ModFilesRepository.readPreparedRootSha(appContext)} clientHash=$contentHash"
+            )
+            val result = loginFailedRewriter.rewriteCleanup(
+                body = cached.body,
+                reasonCode = 1,
+                reasonName = "LOGIN_FAILED",
+                reasonText = getString(R.string.message_refresh_files_before_install),
+                forceRewriteFingerprint = false,
+                thoroughCleanup = false
+            )
+            handleLoginFailedRewriteResult(result, sessionState)
+            val body = result.body
+            VpnLogRepository.log(
+                formatLoginFailedLog(
+                    result = result,
+                    oldLength = cached.body.size,
+                    newLength = body.size,
+                    version = version
+                ) + " source=prepared-hash-mismatch rewriteMs=${elapsedMs(rewriteStartedAt)}"
+            )
+            return buildSupercellMessage(LOGIN_FAILED_ID, body, version)
+        }
         val template = if (isPatchedHash) {
             if (!localSecondLoginFailedInjected.compareAndSet(false, true)) return null
             installLoginFailedTemplateBody ?: return null
@@ -667,6 +712,13 @@ class LocalVpnService : VpnService() {
             ) + " source=${if (isPatchedHash) "cache" else "disk-cache"} rewriteMs=${elapsedMs(rewriteStartedAt)}"
         )
         return buildSupercellMessage(LOGIN_FAILED_ID, body, version)
+    }
+
+    private fun shouldAbortInstallForPreparedHash(clientHash: String?): Boolean {
+        val current = clientHash?.trim()?.ifEmpty { null } ?: return false
+        if (current.startsWith(PATCH_NAMESPACE)) return false
+        val preparedRootSha = ModFilesRepository.readPreparedRootSha(appContext)?.trim()?.ifEmpty { null } ?: return false
+        return preparedRootSha != current
     }
 
     private fun storeInstallLoginFailedTemplate(body: ByteArray, version: Int, clientHelloHash: String) {

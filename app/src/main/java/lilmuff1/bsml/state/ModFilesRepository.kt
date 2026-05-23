@@ -285,6 +285,18 @@ object ModFilesRepository {
         }
     }
 
+    fun readPreparedRootSha(context: Context): String? {
+        val indexFile = File(context.filesDir, PREPARED_INDEX_FILE)
+        if (!indexFile.isFile) return null
+        return runCatching {
+            JSONObject(indexFile.readText())
+                .optString("preparedRootSha", "")
+                .trim()
+                .takeUnless { it == "null" }
+                ?.ifEmpty { null }
+        }.getOrNull()
+    }
+
     fun listPreparedPaths(context: Context): List<String> {
         return listPreparedFiles(context).map { it.path }
     }
@@ -571,9 +583,12 @@ object ModFilesRepository {
                     .put("lastModified", file.lastModified)
             )
         }
-        File(context.filesDir, PREPARED_INDEX_FILE).writeText(
-            JSONObject().put("files", jsonFiles).toString()
-        )
+        val preparedRootSha = LatestFingerprintStore.readStoredClientHelloHash(context.filesDir)
+        val root = JSONObject().put("files", jsonFiles)
+        if (!preparedRootSha.isNullOrBlank()) {
+            root.put("preparedRootSha", preparedRootSha)
+        }
+        File(context.filesDir, PREPARED_INDEX_FILE).writeText(root.toString())
         preparedFilesCache = files
         preparedStateSignature = buildPreparedStateSignature(files)
     }

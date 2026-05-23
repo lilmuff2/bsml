@@ -27,6 +27,7 @@ androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-te
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 xz = { group = "org.tukaani", name = "xz", version = "1.9" }
+lzma = { group = "org.b1.pack", name = "lzma-sdk-4j", version = "9.22.0" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -60,6 +60,7 @@
     <string name="message_reinstall_after_delete_warning">Ты только что удалил мод и ещё не перезапускал игру. Если сейчас сразу начать установку, игра начнёт заново скачивать все файлы, и это может занять очень много времени. Рекомендуется сначала запустить игру без VPN, дождаться загрузки, а уже потом включать VPN и начинать установку.</string>
     <string name="message_delete_imported_mod_confirm">Импортированный мод и подготовленные файлы будут очищены.</string>
     <string name="message_restart_game_to_remove_mods">Вам необходимо перезапустить игру чтобы удалить моды</string>
+    <string name="message_refresh_files_before_install">Вернитесь в загрузчик модов и обновите файлы</string>
     <string name="label_latest_fingerprint">Последний fingerprint</string>
     <string name="label_latest_game_server">Последний игровой сервер</string>
     <string name="value_mod_folder_not_selected">Не выбран</string>

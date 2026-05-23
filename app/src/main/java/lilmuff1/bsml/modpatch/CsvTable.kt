@@ -91,18 +91,7 @@ class CsvTable(
                     if (bytes.size <= 9) {
                         throw DataFormatException("LZMA CSV is too short")
                     }
-                    val propsByte = bytes[0].toInt() and 0xFF
-                    val dictSize =
-                        (bytes[1].toInt() and 0xFF) or
-                            ((bytes[2].toInt() and 0xFF) shl 8) or
-                            ((bytes[3].toInt() and 0xFF) shl 16) or
-                            ((bytes[4].toInt() and 0xFF) shl 24)
-                    LZMAInputStream(
-                        ByteArrayInputStream(bytes, 9, bytes.size - 9),
-                        -1,
-                        propsByte.toByte(),
-                        dictSize
-                    ).use { it.readBytes() }
+                    decodeLzmaCsv(bytes)
                 } catch (error: Throwable) {
                     throw DataFormatException("Failed to decode LZMA CSV: ${error.message ?: "unknown"}")
                 }
@@ -176,6 +165,10 @@ class CsvTable(
                 finishRow()
             }
             return records
+        }
+
+        private fun decodeLzmaCsv(bytes: ByteArray): ByteArray {
+            return daniillnull.tools.LZMA.decompress(bytes)
         }
 
         fun parseRow(input: String): List<String> {

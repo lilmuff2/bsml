@@ -1,6 +1,8 @@
 package lilmuff1.bsml.config
 
 const val GAME_HOST = "game.brawlstarsgame.com"
+const val CHINA_GAME_HOST = "game.brawlstars.cn"
+const val CHINA_STAGE_HOST = "stage.brawlstars.cn"
 const val GAME_PORT = 9339
 const val DEFAULT_CAPTURE_PACKAGES = "com.supercell.brawlstars, bsd.suitcase.release, com.tencent.tmgp.supercell.brawlstars"
 const val DEFAULT_CAPTURE_TARGETS = "game.brawlstarsgame.com, 62.233.36.84,62.233.36.83, game.brawlstars.cn"
