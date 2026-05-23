@@ -12,19 +12,18 @@
 
 ```mermaid
 sequenceDiagram
+    participant CDN as Локальный прокси-сервер
     actor Game as Игра (Клиент)
     participant Proxy as BSML Прокси
     participant Server as Сервер игры
-    participant CDN as Локальный прокси-сервер
+   
 
     Game->>Proxy: 1. CLIENT_HELLO (Оригинальный хеш ассетов)
     Note over Proxy: Меняем хеш на кастомный BSML-Patched
     Proxy->>Server: 2. CLIENT_HELLO (Измененный хеш)
 
     Server->>Proxy: 3. LOGIN_FAILED (Сжатый список файлов и CDN URL)
-    rect rgb(255, 245, 245)
-        Note over Proxy: 1. Прописываем хеши модов в список файлов<br/>2. Меняем CDN URL на http://127.0.0.1
-    end
+    Note over Proxy: 1. Прописываем хеши модов в список файлов<br/>2. Меняем CDN URL на http://127.0.0.1
     Proxy->>Game: 4. LOGIN_FAILED (Измененный список и Локальный URL)
 
     Game->>CDN: 5. HTTP GET (Запрос файлов ресурсов)
