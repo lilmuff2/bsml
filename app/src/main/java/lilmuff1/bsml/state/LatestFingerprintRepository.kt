@@ -79,31 +79,22 @@ object LatestFingerprintRepository {
         )
     }
 
-    suspend fun fetchLatest(context: Context): Boolean = withContext(Dispatchers.IO) {
+    suspend fun fetchLatest(context: Context, targetServer: String? = null): Boolean = withContext(Dispatchers.IO) {
         val filesDir = context.filesDir
         val captureSettings = VpnLogRepository.captureSettingsNow()
-        val storedGameServer = readStoredGameServer(filesDir)
-        val isChinaMode = isChinaCapture(captureSettings)
-        val versionStr = VpnLogRepository.lastClientVersionNow() ?: getInstalledGameVersionName(context)
-        val clientVersion = parseClientVersion(versionStr) ?: FetchClientVersion(55, 228, 1)
-        val configuredTargets = if (captureSettings.filterByIp) {
-            parseTargets(captureSettings.ipFilterText)
-        } else if (isChinaMode) {
-            listOf(CHINA_GAME_HOST, CHINA_STAGE_HOST)
-        } else {
-            parseTargets(DEFAULT_CAPTURE_TARGETS)
-        }
+        val storedGameServer = targetServer ?: readStoredGameServer(filesDir)
         val targets = buildList {
-            storedGameServer
-                ?.takeIf { it.isNotBlank() }
-                ?.takeUnless { isChinaMode && isGlobalDefaultTarget(it) }
-                ?.let(::add)
-            addAll(filterTargetsForMode(configuredTargets, isChinaMode))
-            if (isChinaMode) {
+            storedGameServer?.takeIf { it.isNotBlank() }?.let { add(it) }
+            
+            // Fallback list of configured or defaults
+            if (captureSettings.filterByIp) {
+                addAll(parseTargets(captureSettings.ipFilterText))
+            } else {
+                addAll(parseTargets(DEFAULT_CAPTURE_TARGETS))
+                add(GAME_HOST)
                 add(CHINA_GAME_HOST)
                 add(CHINA_STAGE_HOST)
             }
-            if (isEmpty()) add(GAME_HOST)
         }.distinct().toMutableList()
 
         setProgress(context, 1, context.getString(lilmuff1.bsml.R.string.fetch_latest_stage_connect))
@@ -112,6 +103,26 @@ object LatestFingerprintRepository {
         var targetIndex = 0
         while (targetIndex < targets.size) {
             val target = targets[targetIndex++]
+            val isChina = isChinaHostOrIp(target)
+            val observedVersion = VpnLogRepository.lastClientVersionNow()
+            val parsedObservedMajor = parseClientVersion(observedVersion)?.major
+            
+            // Only use observed version if it is plausible for this region
+            val observedMajor = parsedObservedMajor?.takeIf { major ->
+                if (isChina) major < 60 else major >= 60
+            }
+            
+            val installedVersion = getInstalledVersionForRegion(context, isChina)
+            val parsedInstalledMajor = parseClientVersion(installedVersion)?.major
+            val major = observedMajor ?: parsedInstalledMajor ?: (if (isChina) 55 else 67)
+            
+            // Send the matching major version with revision and build set to 0.
+            // This ensures protocol compatibility while forcing the server to treat the
+            // client as outdated and return the latest fingerprint in the LOGIN_FAILED response.
+            val clientVersion = FetchClientVersion(major, 0, 0)
+            
+            VpnLogRepository.log("SC latest fingerprint: Connecting to target=$target (China=$isChina)...")
+            VpnLogRepository.log("SC latest fingerprint: Sending CLIENT_HELLO with major=$major (FetchClientVersion=${clientVersion.major}.${clientVersion.revision}.${clientVersion.build})...")
             try {
                 Socket().use { socket ->
                     socket.soTimeout = SOCKET_READ_TIMEOUT_MS
@@ -126,15 +137,19 @@ object LatestFingerprintRepository {
                     setProgress(context, 3, context.getString(lilmuff1.bsml.R.string.fetch_latest_stage_wait))
                     val loginFailedBody = readLoginFailedBody(input)
                         ?: error("LOGIN_FAILED not received from $target")
+                    VpnLogRepository.log("SC latest fingerprint: Received LOGIN_FAILED from $target (body size=${loginFailedBody.size})")
 
                     setProgress(context, 4, context.getString(lilmuff1.bsml.R.string.fetch_latest_stage_unpack))
                     val parsed = LoginFailedPrefix.parse(loginFailedBody)
                         ?: error("Failed to parse LOGIN_FAILED from $target")
                     val tail = LoginFailedTail.parse(parsed.suffix)
                     val fingerprintJson = extractFingerprintJson(parsed, tail)
+                    
+                    VpnLogRepository.log("SC latest fingerprint: Parsed LOGIN_FAILED: reason=${parsed.reason}, fingerprintLen=${parsed.fingerprint?.length ?: 0}, suffixLen=${parsed.suffix?.size ?: 0}")
+                    
                     if (fingerprintJson == null) {
                         val redirectTargets = if (parsed.reason == 9) {
-                            extractRedirectTargets(parsed, tail, isChinaMode)
+                            extractRedirectTargets(parsed, tail)
                         } else {
                             emptyList()
                         }
@@ -297,22 +312,7 @@ object LatestFingerprintRepository {
             .distinct()
     }
 
-    private fun isChinaCapture(settings: VpnCaptureSettings): Boolean {
-        val packageText = settings.packageText.lowercase()
-        val targetText = settings.ipFilterText.lowercase()
-        return settings.autoLaunchPackage == CHINA_PACKAGE ||
-            packageText.split(',', '\n', '\r', '\t', ' ').any { it.trim() == CHINA_PACKAGE } ||
-            targetText.contains(".cn")
-    }
-
-    private fun filterTargetsForMode(targets: List<String>, isChinaMode: Boolean): List<String> {
-        if (!isChinaMode) return targets
-        return targets.filterNot(::isGlobalDefaultTarget)
-    }
-
-    private fun isGlobalDefaultTarget(target: String): Boolean {
-        return GLOBAL_DEFAULT_TARGETS.contains(target.trim().lowercase())
-    }
+    // (Helper functions for China mode removed to simplify fingerprint fetching)
 
     private fun buildClientHelloBody(version: FetchClientVersion): ByteArray {
         val writer = ByteWriter()
@@ -327,16 +327,33 @@ object LatestFingerprintRepository {
         return writer.toByteArray()
     }
 
-    private fun getInstalledGameVersionName(context: Context): String? {
+    private fun isChinaHostOrIp(host: String): Boolean {
+        val normalized = host.lowercase().trim()
+        if (normalized.endsWith(".cn") || normalized.contains("brawlstars.cn") || normalized.contains("tencent")) {
+            return true
+        }
+        if (normalized.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) {
+            return !normalized.startsWith("62.")
+        }
+        return false
+    }
+
+    private fun getInstalledVersionForRegion(context: Context, isChina: Boolean): String? {
+        val chinaPackage = "com.tencent.tmgp.supercell.brawlstars"
+        val globalPackage = "com.supercell.brawlstars"
         val captureSettings = VpnLogRepository.captureSettingsNow()
-        val packages = buildList {
-            captureSettings.autoLaunchPackage?.let { add(it) }
-            captureSettings.packageText.split(',', ' ', '\n', '\r', '\t')
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .forEach { add(it) }
-        }.distinct()
-        
+        val packages = if (isChina) {
+            listOf(chinaPackage)
+        } else {
+            buildList {
+                captureSettings.autoLaunchPackage?.takeIf { it != chinaPackage }?.let { add(it) }
+                captureSettings.packageText.split(',', ' ', '\n', '\r', '\t')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && it != chinaPackage }
+                    .forEach { add(it) }
+                add(globalPackage)
+            }.distinct()
+        }
         for (pkg in packages) {
             try {
                 val info = context.packageManager.getPackageInfo(pkg, 0)
@@ -345,7 +362,7 @@ object LatestFingerprintRepository {
                     return version
                 }
             } catch (_: Throwable) {
-                // package not installed, try next one
+                // package not installed
             }
         }
         return null
@@ -396,8 +413,7 @@ object LatestFingerprintRepository {
 
     private fun extractRedirectTargets(
         parsed: LoginFailedPrefix,
-        tail: LoginFailedTail?,
-        isChinaMode: Boolean
+        tail: LoginFailedTail?
     ): List<String> {
         val textFields = listOfNotNull(
             parsed.unknownString,
@@ -416,9 +432,7 @@ object LatestFingerprintRepository {
                 }.toList()
             }
             .filter { host ->
-                host.contains("brawlstars") &&
-                    !host.contains("asset") &&
-                    (!isChinaMode || host.endsWith(".cn"))
+                host.contains("brawlstars") && !host.contains("asset")
             }
             .distinct()
     }
@@ -487,6 +501,44 @@ object LatestFingerprintRepository {
             }
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    fun extractAndSaveFingerprint(context: Context, loginFailedBody: ByteArray): Boolean {
+        try {
+            VpnLogRepository.log("SC extract-fingerprint: Attempting to extract fingerprint directly from intercepted LOGIN_FAILED packet (length=${loginFailedBody.size})...")
+            val parsed = LoginFailedPrefix.parse(loginFailedBody)
+            if (parsed == null) {
+                VpnLogRepository.log("SC extract-fingerprint failed: Could not parse LoginFailedPrefix")
+                return false
+            }
+            val tail = LoginFailedTail.parse(parsed.suffix)
+            val fingerprintJson = extractFingerprintJson(parsed, tail)
+            if (fingerprintJson == null) {
+                VpnLogRepository.log("SC extract-fingerprint failed: Fingerprint JSON not found in prefix or tail (reason=${parsed.reason}, suffixLen=${parsed.suffix?.size ?: 0})")
+                return false
+            }
+            val rootSha = extractRootSha(fingerprintJson)
+            if (rootSha == null) {
+                VpnLogRepository.log("SC extract-fingerprint failed: Root SHA not found in fingerprint JSON: $fingerprintJson")
+                return false
+            }
+            val origins = linkedSetOf<String>().apply {
+                parsed.contentDownloadUrl?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
+                tail?.contentDownloadUrls
+                    ?.map(String::trim)
+                    ?.filter(String::isNotEmpty)
+                    ?.forEach(::add)
+            }
+            
+            saveLatest(context.filesDir, fingerprintJson, origins, rootSha)
+            LoginFailedRewritePrewarmer.prewarm(context)
+            refreshState(context)
+            VpnLogRepository.log("SC extract-fingerprint success: Extracted and saved fingerprint directly! rootSha=$rootSha, origins=${origins.size}")
+            return true
+        } catch (e: Throwable) {
+            VpnLogRepository.log("SC extract-fingerprint error: ${e::class.java.simpleName}: ${e.message}")
+            return false
         }
     }
 }

@@ -82,9 +82,12 @@ class LocalVpnService : VpnService() {
     private var installLoginFailedTemplateClientHash: String? = null
     private val localFirstLoginFailedInjected = AtomicBoolean(false)
     private val localSecondLoginFailedInjected = AtomicBoolean(false)
+    @Volatile
+    private var lastRecoveredHash: String? = null
 
     private class InstallSessionState {
         @Volatile var originalAssetRootSha: String? = null
+        @Volatile var serverIp: Int = 0
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -538,6 +541,22 @@ class LocalVpnService : VpnService() {
             VpnLogRepository.log(
                 "SC install aborted preparedRootSha=${ModFilesRepository.readPreparedRootSha(appContext)} clientHash=${currentClientHash ?: "<null>"}"
             )
+            val extracted = LatestFingerprintRepository.extractAndSaveFingerprint(appContext, body)
+            if (extracted) {
+                VpnLogRepository.log("SC auto-recovery: Extracted fingerprint from intercept! Re-preparing files...")
+                kotlin.concurrent.thread(name = "BSML-AutoRecovery-Intercept") {
+                    try {
+                        kotlinx.coroutines.runBlocking {
+                            ModFilesRepository.prepareFiles(appContext)
+                        }
+                        VpnLogRepository.log("SC auto-recovery: Mod files successfully re-prepared from intercepted fingerprint. Restart the game to load the mod!")
+                    } catch (e: Throwable) {
+                        VpnLogRepository.log("SC auto-recovery compilation error: ${e::class.java.simpleName}: ${e.message}")
+                    }
+                }
+            } else {
+                triggerAutoFingerprintRecovery(currentClientHash, intToIpv4(sessionState.serverIp))
+            }
             val result = loginFailedRewriter.rewriteCleanup(
                 body = body,
                 reasonCode = 1,
@@ -660,6 +679,7 @@ class LocalVpnService : VpnService() {
             VpnLogRepository.log(
                 "SC install aborted preparedRootSha=${ModFilesRepository.readPreparedRootSha(appContext)} clientHash=$contentHash"
             )
+            triggerAutoFingerprintRecovery(contentHash, intToIpv4(sessionState.serverIp))
             val result = loginFailedRewriter.rewriteCleanup(
                 body = cached.body,
                 reasonCode = 1,
@@ -712,6 +732,32 @@ class LocalVpnService : VpnService() {
             ) + " source=${if (isPatchedHash) "cache" else "disk-cache"} rewriteMs=${elapsedMs(rewriteStartedAt)}"
         )
         return buildSupercellMessage(LOGIN_FAILED_ID, body, version)
+    }
+
+    private fun triggerAutoFingerprintRecovery(clientHash: String?, targetServer: String) {
+        val hash = clientHash?.trim()?.ifEmpty { null } ?: return
+        if (lastRecoveredHash == hash) return
+        lastRecoveredHash = hash
+        kotlin.concurrent.thread(name = "BSML-AutoRecovery") {
+            try {
+                VpnLogRepository.log("SC auto-recovery: Mismatch detected. Querying latest fingerprint for hash $hash from $targetServer...")
+                val success = kotlinx.coroutines.runBlocking {
+                    LatestFingerprintRepository.fetchLatest(appContext, targetServer)
+                }
+                if (success) {
+                    val newHash = LatestFingerprintRepository.readStoredClientHelloHash(appContext.filesDir)
+                    VpnLogRepository.log("SC auto-recovery: Fingerprint successfully updated to $newHash!")
+                    kotlinx.coroutines.runBlocking {
+                        ModFilesRepository.prepareFiles(appContext)
+                    }
+                    VpnLogRepository.log("SC auto-recovery: Mod files successfully re-prepared. Restart the game to load the mod!")
+                } else {
+                    VpnLogRepository.log("SC auto-recovery: Failed to retrieve fingerprint from $targetServer in the background.")
+                }
+            } catch (e: Throwable) {
+                VpnLogRepository.log("SC auto-recovery error: ${e::class.java.simpleName}: ${e.message}")
+            }
+        }
     }
 
     private fun shouldAbortInstallForPreparedHash(clientHash: String?): Boolean {
@@ -885,7 +931,9 @@ class LocalVpnService : VpnService() {
             }
 
             sessions[key]?.close()
-            val sessionState = InstallSessionState()
+            val sessionState = InstallSessionState().apply {
+                serverIp = key.serverIp
+            }
             sessions[key] = TcpProxySession(
                 key = key,
                 clientInitialSeq = syn.sequenceNumber,

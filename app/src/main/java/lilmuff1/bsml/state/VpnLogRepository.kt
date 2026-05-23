@@ -42,6 +42,7 @@ object VpnLogRepository {
     private const val KEY_AUTO_PREPARE_FILES_DELAY_SECONDS = "auto_prepare_files_delay_seconds"
     private const val KEY_EXPORT_LOG_LINES = "export_log_lines"
     private const val KEY_THOROUGH_MOD_DELETE = "thorough_mod_delete"
+    private const val KEY_SERVER_REGION = "server_region"
     private val cleanupWarmupReason = CleanupReasonSpec(7, "CLIENT_CONTENT_UPDATE")
 
     private val logLock = Any()
@@ -105,6 +106,9 @@ object VpnLogRepository {
     private val _isThoroughModDeleteEnabled = MutableStateFlow(false)
     val isThoroughModDeleteEnabled = _isThoroughModDeleteEnabled.asStateFlow()
 
+    private val _serverRegion = MutableStateFlow("auto")
+    val serverRegion = _serverRegion.asStateFlow()
+
     private val _deleteCleanupPending = MutableStateFlow(false)
     val deleteCleanupPending = _deleteCleanupPending.asStateFlow()
 
@@ -131,6 +135,7 @@ object VpnLogRepository {
             _autoPrepareFilesDelaySeconds.value = prefs.getInt(KEY_AUTO_PREPARE_FILES_DELAY_SECONDS, 3).toString()
             _exportLogLines.value = prefs.getInt(KEY_EXPORT_LOG_LINES, 50).toString()
             _isThoroughModDeleteEnabled.value = prefs.getBoolean(KEY_THOROUGH_MOD_DELETE, false)
+            _serverRegion.value = prefs.getString(KEY_SERVER_REGION, "auto") ?: "auto"
             preferencesLoaded = true
         }
     }
@@ -301,6 +306,13 @@ object VpnLogRepository {
     }
 
     fun isThoroughModDeleteEnabledNow(): Boolean = _isThoroughModDeleteEnabled.value
+
+    fun setServerRegion(context: Context, region: String) {
+        _serverRegion.value = region
+        updatePreference(context) { putString(KEY_SERVER_REGION, region) }
+    }
+
+    fun serverRegionNow(): String = _serverRegion.value
 
     fun markDeleteCleanupPending() {
         _deleteCleanupPending.value = true
