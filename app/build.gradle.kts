@@ -52,7 +52,6 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.xz)
     implementation(libs.lzma)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

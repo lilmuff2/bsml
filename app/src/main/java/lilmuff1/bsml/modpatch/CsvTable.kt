@@ -4,7 +4,6 @@ import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.DataFormatException
 import org.json.JSONObject
-import org.tukaani.xz.LZMAInputStream
 
 class CsvTable(
     val columns: List<String>,
