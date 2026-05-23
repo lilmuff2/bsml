@@ -1,10 +1,12 @@
 package lilmuff1.bsml.modpatch
 
 import java.io.File
+import java.util.Locale
 import java.util.zip.ZipFile
 import lilmuff1.bsml.state.ImportedModFeature
 import lilmuff1.bsml.state.ImportedModFeatureGroup
 import lilmuff1.bsml.state.ImportedModMetadata
+import lilmuff1.bsml.state.VpnLogRepository
 import org.json.JSONObject
 
 object NbAssetsArchiveReader {
@@ -78,9 +80,19 @@ object NbAssetsArchiveReader {
 
     private fun localizedText(value: Any?): String? {
         return when (value) {
-            is JSONObject -> value.optString("RU", "")
-                .ifEmpty { value.optString("EN", "") }
-                .ifEmpty { null }
+            is JSONObject -> {
+                val appLanguage = VpnLogRepository.appLanguageNow()
+                val preferredTag = if (appLanguage == "system") {
+                    Locale.getDefault().language
+                } else {
+                    appLanguage
+                }
+                val preferred = preferredTag.uppercase(Locale.ROOT)
+                value.optString(preferred, "")
+                    .ifEmpty { value.optString("EN", "") }
+                    .ifEmpty { value.optString("RU", "") }
+                    .ifEmpty { value.keys().asSequence().mapNotNull { key -> value.optString(key, "").takeIf { it.isNotEmpty() } }.firstOrNull() }
+            }
             is String -> value.ifEmpty { null }
             else -> null
         }

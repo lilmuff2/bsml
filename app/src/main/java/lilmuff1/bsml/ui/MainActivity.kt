@@ -202,6 +202,7 @@ private fun MainScreen() {
     val isAssetProxyRunning by VpnLogRepository.isAssetProxyRunning.collectAsState()
     val isAutoVpnDisableEnabled by VpnLogRepository.isAutoVpnDisableEnabled.collectAsState()
     val isInstallResultNotificationsEnabled by VpnLogRepository.isInstallResultNotificationsEnabled.collectAsState()
+    val appLanguage by VpnLogRepository.appLanguage.collectAsState()
     val showReinstallWarningAfterDelete by VpnLogRepository.showReinstallWarningAfterDelete.collectAsState()
     val isThoroughModDeleteEnabled by VpnLogRepository.isThoroughModDeleteEnabled.collectAsState()
     val isAutoPrepareFilesEnabled by VpnLogRepository.isAutoPrepareFilesEnabled.collectAsState()
@@ -289,6 +290,13 @@ private fun MainScreen() {
             ModFilesRepository.refreshState(context)
             LatestFingerprintRepository.refreshState(context)
             LatestFingerprintRepository.fetchLatest(context)
+        }
+    }
+
+    LaunchedEffect(appLanguage) {
+        withContext(Dispatchers.IO) {
+            ImportedModRepository.refreshState(context)
+            ModFilesRepository.refreshPreparedStateFromImportedMod(context)
         }
     }
 

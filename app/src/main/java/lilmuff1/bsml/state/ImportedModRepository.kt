@@ -292,6 +292,18 @@ object ImportedModRepository {
     }
 
     private fun readMetadata(modDir: File): ImportedModMetadata? {
+        return runCatching {
+            val live = NbAssetsArchiveReader.readMetadata(modDir)
+            val cached = readCachedMetadata(modDir)
+            live.copy(
+                isSignatureVerified = cached?.isSignatureVerified ?: true
+            )
+        }.getOrElse {
+            readCachedMetadata(modDir)
+        }
+    }
+
+    private fun readCachedMetadata(modDir: File): ImportedModMetadata? {
         val file = metadataFile(modDir)
         if (!file.isFile) return null
         return runCatching {
