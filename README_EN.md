@@ -22,9 +22,7 @@ sequenceDiagram
     Proxy->>Server: 2. CLIENT_HELLO (patched hash)
 
     Server->>Proxy: 3. LOGIN_FAILED (fingerprint and asset URLs)
-    rect rgb(245, 245, 255)
-        Note over Proxy: Patch file hashes and redirect asset URLs
-    end
+    Note over Proxy: Patch file hashes and redirect asset URLs
     Proxy->>Game: 4. LOGIN_FAILED (patched fingerprint and local URL)
 
     Game->>CDN: 5. HTTP GET asset files
