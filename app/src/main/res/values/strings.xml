@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">BSML</string>
-    <string name="status_vpn_permission_denied">VPN permission denied</string>
-    <string name="log_vpn_permission_denied">VPN permission denied by user</string>
+    <string name="status_vpn_permission_denied">Разрешение на VPN не полученно</string>
+    <string name="log_vpn_permission_denied" translatable="false">VPN permission denied by user</string>
     <string name="label_auto_disable_vpn">Авто выключение VPN</string>
     <string name="hint_auto_disable_vpn">После завершения установки приложение отключит перехват. Игра может показать ошибку соединения это нормально.</string>
     <string name="label_install_result_notifications">Уведомления о результате установки</string>
@@ -81,9 +81,9 @@
     <string name="warning_mod_unverified_signature">Мод непроверенный и может не работать: архив не подписан нужной подписью</string>
     <string name="warning_mod_old_game_version">Мод для старой версии игры (%1$d), текущая версия: %2$d</string>
     <string name="option_no_feature">Никакую</string>
-    <string name="label_author_telegram">Telegram</string>
-    <string name="label_author_discord">Discord</string>
-    <string name="label_author_github">GitHub</string>
+    <string name="label_author_telegram" translatable="false">Telegram</string>
+    <string name="label_author_discord" translatable="false">Discord</string>
+    <string name="label_author_github" translatable="false">GitHub</string>
     <string name="label_author_website">Сайт</string>
     <string name="fetch_latest_stage_connect">Подключение к серверу</string>
     <string name="fetch_latest_stage_request">Запрос fingerprint: %1$s</string>
@@ -92,10 +92,10 @@
     <string name="fetch_latest_stage_save">Сохранение fingerprint</string>
     <string name="fetch_latest_done">Fingerprint сохранен: %1$s</string>
     <string name="fetch_latest_error_unknown">Не удалось получить fingerprint</string>
-    <string name="log_fetch_latest_started">SC latest fingerprint fetch started</string>
-    <string name="notification_asset_proxy_title">BSML Asset Proxy</string>
-    <string name="notification_asset_proxy_text">Proxying game assets</string>
-    <string name="notification_vpn_text">TCP proxy is starting</string>
+    <string name="log_fetch_latest_started" translatable="false">SC latest fingerprint fetch started</string>
+    <string name="notification_asset_proxy_title" translatable="false">BSML Asset Proxy</string>
+    <string name="notification_asset_proxy_text" translatable="false">Proxying game assets</string>
+    <string name="notification_vpn_text" translatable="false">TCP proxy is starting</string>
     <string name="notification_install_result_channel">Результат установки мода</string>
     <string name="notification_install_result_title">Мод установлен</string>
     <string name="notification_install_result_text">Применено %1$d из %2$d файлов</string>
