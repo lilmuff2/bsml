@@ -81,7 +81,7 @@
     <string name="status_mod_empty">В моде нет файлов</string>
     <string name="status_mod_not_prepared">Файлы еще не подготовлены</string>
     <string name="status_mod_error_prefix">Ошибка подготовки:</string>
-    <string name="prepare_stage_archive">Чтение архива</string>
+    <string name="prepare_stage_archive">Сканирование мода</string>
     <string name="prepare_stage_csv">Патч CSV</string>
     <string name="prepare_stage_original_assets">Подготовка исходных файлов</string>
     <string name="prepare_stage_saving">Сохранение индекса</string>

@@ -81,7 +81,7 @@
     <string name="status_mod_empty">模组中没有文件</string>
     <string name="status_mod_not_prepared">文件尚未准备</string>
     <string name="status_mod_error_prefix">准备错误：</string>
-    <string name="prepare_stage_archive">正在读取归档</string>
+    <string name="prepare_stage_archive">正在扫描模组</string>
     <string name="prepare_stage_csv">正在修补 CSV</string>
     <string name="prepare_stage_original_assets">正在准备源文件</string>
     <string name="prepare_stage_saving">正在保存索引</string>

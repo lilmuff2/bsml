@@ -49,6 +49,7 @@ object ModFilesRepository {
 
     private const val PREPARED_INDEX_FILE = "prepared_mod_index.json"
     private const val PREPARED_FILES_DIR = "prepared_mod_files"
+    private const val PREPARE_SIGNATURE_KEY = "prepareSignature"
     private val prepareDispatcher = Dispatchers.IO.limitedParallelism(PREPARE_FILE_PARALLELISM)
     private val prepareMutex = Mutex()
 
@@ -205,6 +206,21 @@ object ModFilesRepository {
         ImportedModRepository.refreshState(context)
         val imported = ImportedModRepository.state.value
         val folderName = imported.metadata?.title ?: imported.fileName ?: archives.first().name
+        val prepareSignature = buildImportedPrepareSignature(context, imported, archives)
+        val cachedPrepared = listPreparedFiles(context)
+        if (cachedPrepared.isNotEmpty() && readPreparedPrepareSignature(context) == prepareSignature && preparedFilesExist(cachedPrepared)) {
+            _preparation.value = ModPreparationState(
+                folderName = folderName,
+                isPreparing = false,
+                preparedCount = cachedPrepared.size,
+                totalCount = cachedPrepared.size,
+                isReady = true,
+                error = null
+            )
+            VpnLogRepository.log("NBASSETS prepare skip cache files=${cachedPrepared.size} ms=${elapsedMs(startedAt)}")
+            LoginFailedRewritePrewarmer.prewarm(context)
+            return@withContext true
+        }
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = true,
@@ -280,7 +296,7 @@ object ModFilesRepository {
                 isReady = false,
                 error = null
             )
-            writePreparedIndex(context, prepared)
+            writePreparedIndex(context, prepared, prepareSignature)
             _preparation.value = ModPreparationState(
                 folderName = folderName,
                 isPreparing = false,
@@ -439,7 +455,7 @@ object ModFilesRepository {
             VpnLogRepository.log("PREPARE original-assets-only failed path=${sourceFiles[failedIndex].path} ms=${elapsedMs(startedAt)}")
             return@withContext false
         }
-        writePreparedIndex(context, preparedFiles.filterNotNull())
+        writePreparedIndex(context, preparedFiles.filterNotNull(), buildOriginalAssetsPrepareSignature(context))
         _preparation.value = ModPreparationState(
             folderName = folderName,
             isPreparing = false,
@@ -452,7 +468,7 @@ object ModFilesRepository {
         return@withContext preparedFiles.isNotEmpty()
     }
 
-    private fun writePreparedIndex(context: Context, files: List<PreparedModFile>) {
+    private fun writePreparedIndex(context: Context, files: List<PreparedModFile>, prepareSignature: String? = null) {
         val jsonFiles = JSONArray()
         files.forEach { file ->
             jsonFiles.put(
@@ -469,9 +485,87 @@ object ModFilesRepository {
         if (!preparedRootSha.isNullOrBlank()) {
             root.put("preparedRootSha", preparedRootSha)
         }
+        if (!prepareSignature.isNullOrBlank()) {
+            root.put(PREPARE_SIGNATURE_KEY, prepareSignature)
+        }
         File(context.filesDir, PREPARED_INDEX_FILE).writeText(root.toString())
         preparedFilesCache = files
         preparedStateSignature = buildPreparedStateSignature(files)
+    }
+
+    private fun readPreparedPrepareSignature(context: Context): String? {
+        val indexFile = File(context.filesDir, PREPARED_INDEX_FILE)
+        if (!indexFile.isFile) return null
+        return runCatching {
+            JSONObject(indexFile.readText())
+                .optString(PREPARE_SIGNATURE_KEY, "")
+                .trim()
+                .ifEmpty { null }
+        }.getOrNull()
+    }
+
+    private fun preparedFilesExist(files: List<PreparedModFile>): Boolean {
+        return files.all { file ->
+            val uri = Uri.parse(file.uri)
+            if (uri.scheme == "file") {
+                uri.path?.let { File(it).isFile } == true
+            } else {
+                true
+            }
+        }
+    }
+
+    private fun buildImportedPrepareSignature(
+        context: Context,
+        imported: ImportedModState,
+        archives: List<File>
+    ): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        fun add(value: String?) {
+            digest.update((value ?: "").encodeToByteArray())
+            digest.update(0)
+        }
+
+        add("imported")
+        add(LatestFingerprintStore.readStoredClientHelloHash(context.filesDir))
+        archives.forEach { archive ->
+            val mod = imported.mods.firstOrNull { it.id == archive.name }
+            add(archive.name)
+            add(archive.length().toString())
+            add(archive.lastModified().toString())
+            add(mod?.isEnabled.toString())
+            add(mod?.featureSelection?.enabledFeatureIds.orEmpty().sorted().joinToString(","))
+            add(mod?.featureSelection?.disabledGroupIds.orEmpty().sorted().joinToString(","))
+        }
+        OriginalAssetsRepository.listFiles(context)
+            .sortedBy { it.path }
+            .forEach { file ->
+                add(file.path)
+                add(file.uri.toString())
+                add(file.size.toString())
+                add(file.lastModified.toString())
+            }
+        return digest.digest().joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
+    }
+
+    private fun buildOriginalAssetsPrepareSignature(context: Context): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        fun add(value: String?) {
+            digest.update((value ?: "").encodeToByteArray())
+            digest.update(0)
+        }
+
+        add("original-assets")
+        add(LatestFingerprintStore.readStoredClientHelloHash(context.filesDir))
+        OriginalAssetsRepository.listFiles(context)
+            .sortedBy { it.path }
+            .forEach { file ->
+                add(file.path)
+                add(file.uri.toString())
+                add(file.size.toString())
+                add(file.lastModified.toString())
+            }
+        return digest.digest().joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
     }
 
     private fun sha1Hex(input: java.io.InputStream): String {

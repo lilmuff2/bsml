@@ -81,7 +81,7 @@
     <string name="status_mod_empty">No files in the mod</string>
     <string name="status_mod_not_prepared">Files not prepared yet</string>
     <string name="status_mod_error_prefix">Preparation error:</string>
-    <string name="prepare_stage_archive">Reading archive</string>
+    <string name="prepare_stage_archive">Scanning mod</string>
     <string name="prepare_stage_csv">Patching CSV</string>
     <string name="prepare_stage_original_assets">Preparing source files</string>
     <string name="prepare_stage_saving">Saving index</string>

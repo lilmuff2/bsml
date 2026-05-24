@@ -19,6 +19,7 @@ class NbAssetsCompiler(
 ) {
     companion object {
         private const val LAST_MERGED_PATCH_JSON_FILE = "last_nbassets_patch.json"
+        private const val STATIC_ASSET_INDEX_FILE = ".bsml_static_assets.json"
 
         @Volatile
         private var lastMergedPatchJson: String? = null
@@ -61,7 +62,10 @@ class NbAssetsCompiler(
         val patchJson = JSONObject()
         val roots = LinkedHashSet<String>()
         val prepared = LinkedHashMap<String, PreparedModFile>()
+        val staticAssetCache = loadStaticAssetCache(archive)
+        var staticCacheChanged = false
         var assetCount = 0
+        var cachedAssetCount = 0
         var csvCount = 0
 
         contentParts.forEach { part ->
@@ -85,9 +89,33 @@ class NbAssetsCompiler(
             val assetPath = archiveAssetPath(path, roots.toList(), allPatchFiles, inactiveFeatureRoots) ?: return@forEach
             prepared[assetPath] = if (archive.isDirectory) {
                 val sourceFile = File(archive, path)
+                val cached = staticAssetCache.optJSONObject(path)
+                val cachedSize = cached?.optLong("size", -1L) ?: -1L
+                val cachedLastModified = cached?.optLong("lastModified", -1L) ?: -1L
+                val cachedSha = cached?.optString("sha", "")?.takeIf { it.isNotBlank() }
+                val sha = if (
+                    cachedSha != null &&
+                    cachedSize == sourceFile.length() &&
+                    cachedLastModified == sourceFile.lastModified()
+                ) {
+                    cachedAssetCount++
+                    cachedSha
+                } else {
+                    sha1Hex(sourceFile.inputStream()).also { newSha ->
+                        staticAssetCache.put(
+                            path,
+                            JSONObject()
+                                .put("assetPath", assetPath)
+                                .put("sha", newSha)
+                                .put("size", sourceFile.length())
+                                .put("lastModified", sourceFile.lastModified())
+                        )
+                        staticCacheChanged = true
+                    }
+                }
                 PreparedModFile(
                     path = assetPath,
-                    sha = sha1Hex(sourceFile.readBytes()),
+                    sha = sha,
                     uri = Uri.fromFile(sourceFile).toString(),
                     size = sourceFile.length(),
                     lastModified = sourceFile.lastModified()
@@ -107,6 +135,9 @@ class NbAssetsCompiler(
             }
             assetCount++
         }
+        if (staticCacheChanged) {
+            saveStaticAssetCache(archive, staticAssetCache)
+        }
         val currentPatchJson = patchJson.toString()
         val mergedPatchJson = if (clearOutput) {
             currentPatchJson
@@ -115,7 +146,7 @@ class NbAssetsCompiler(
         }
         lastMergedPatchJson = mergedPatchJson
         lastMergedPatchJsonFile(context).writeText(mergedPatchJson)
-        VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size} file=${archive.name}")
+        VpnLogRepository.log("NBASSETS prepare assets=$assetCount cached=$cachedAssetCount patches=${activePatchFiles.size} parts=${contentParts.size} file=${archive.name}")
         val tablePatches = patchJson.keysList()
             .sorted()
             .mapNotNull { tableName -> patchJson.optJSONObject(tableName)?.let { tableName to it } }
@@ -163,6 +194,7 @@ class NbAssetsCompiler(
     ): String? {
         if (path.startsWith("META-INF/") || path.startsWith("build/")) return null
         if (path == "metadata.json" || path == "feature_selection.json" || path == "mod_state.json") return null
+        if (path == STATIC_ASSET_INDEX_FILE) return null
         if (patchFiles.contains(path)) return null
         if (inactiveFeatureRoots.any { root -> path == root || path.startsWith("$root/") }) return null
 
@@ -220,6 +252,20 @@ class NbAssetsCompiler(
             archive.getInputStream(entry).use { it.readBytes() }
         } finally {
             if (zip == null) archive.close()
+        }
+    }
+
+    private fun loadStaticAssetCache(source: File): JSONObject {
+        if (!source.isDirectory) return JSONObject()
+        val file = File(source, STATIC_ASSET_INDEX_FILE)
+        if (!file.isFile) return JSONObject()
+        return runCatching { JSONObject(file.readText()) }.getOrDefault(JSONObject())
+    }
+
+    private fun saveStaticAssetCache(source: File, cache: JSONObject) {
+        if (!source.isDirectory) return
+        runCatching {
+            File(source, STATIC_ASSET_INDEX_FILE).writeText(cache.toString())
         }
     }
 

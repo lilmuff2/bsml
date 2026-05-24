@@ -9,6 +9,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -107,22 +108,31 @@ class LocalAssetProxyServer(
         try {
             BufferedInputStream(client.getInputStream()).use { input ->
                 BufferedOutputStream(client.getOutputStream()).use { output ->
-                    val requestLine = input.readAsciiLine() ?: return
-                    if (requestLine.isBlank()) return
-                    val parts = requestLine.split(" ")
-                    if (parts.size < 2) {
-                        writeSimpleResponse(output, 400, "Bad Request")
-                        return
+                    while (running && !client.isClosed) {
+                        val requestLine = try {
+                            input.readAsciiLine()
+                        } catch (_: SocketTimeoutException) {
+                            return
+                        } ?: return
+                        if (requestLine.isBlank()) return
+                        val parts = requestLine.split(" ")
+                        if (parts.size < 2) {
+                            writeSimpleResponse(output, 400, "Bad Request", close = true)
+                            return
+                        }
+                        val method = parts[0]
+                        val path = parts[1]
+                        val httpVersion = parts.getOrNull(2) ?: "HTTP/1.0"
+                        val headers = readHeaders(input)
+                        val keepAlive = shouldKeepAlive(httpVersion, headers)
+                        val assetPath = normalizeAssetPath(path.substringBefore('?'))
+                        if (!firstAssetRequestSeen) {
+                            firstAssetRequestSeen = true
+                            onFirstAssetRequest()
+                        }
+                        val closeAfterResponse = handleAssetRequest(method, path, assetPath, headers, output, keepAlive)
+                        if (closeAfterResponse || !keepAlive) return
                     }
-                    val method = parts[0]
-                    val path = parts[1]
-                    val headers = readHeaders(input)
-                    val assetPath = normalizeAssetPath(path.substringBefore('?'))
-                    if (!firstAssetRequestSeen) {
-                        firstAssetRequestSeen = true
-                        onFirstAssetRequest()
-                    }
-                    handleAssetRequest(method, path, assetPath, headers, output)
                 }
             }
         } catch (error: Throwable) {
@@ -140,21 +150,22 @@ class LocalAssetProxyServer(
         path: String,
         assetPath: String,
         headers: Map<String, String>,
-        output: BufferedOutputStream
-    ) {
+        output: BufferedOutputStream,
+        keepAlive: Boolean
+    ): Boolean {
         val patchedAsset = openPatchedAsset(assetPath)
         if (patchedAsset != null) {
             onPatchedAssetServed(assetPath)
-            writePatchedAssetResponse(method, assetPath, patchedAsset, output)
+            writePatchedAssetResponse(method, assetPath, patchedAsset, output, keepAlive)
             onLog("ASSET $method $path normalized=$assetPath result=patched code=200 bytes=${patchedAsset.length}")
-            return
+            return false
         }
 
         val originsSnapshot = origins
         if (originsSnapshot.isEmpty()) {
             onLog("ASSET $method $path normalized=$assetPath result=no-origin")
-            writeSimpleResponse(output, 502, "No Origin")
-            return
+            writeSimpleResponse(output, 502, "No Origin", close = true)
+            return true
         }
 
         var successfulConnection: HttpURLConnection? = null
@@ -180,6 +191,7 @@ class LocalAssetProxyServer(
         onLog("ASSET $method $path normalized=$assetPath result=origin code=$lastCode url=$lastUrl")
         writeHttpResponse(connection, output)
         connection.disconnect()
+        return true
     }
 
     private fun rewriteCustomRootPathForOrigin(path: String): String {
@@ -214,7 +226,8 @@ class LocalAssetProxyServer(
         method: String,
         path: String,
         asset: PatchedAsset,
-        output: BufferedOutputStream
+        output: BufferedOutputStream,
+        keepAlive: Boolean
     ) {
         val contentType = when {
             path.endsWith(".csv", ignoreCase = true) -> "text/csv"
@@ -225,11 +238,14 @@ class LocalAssetProxyServer(
         output.write("HTTP/1.1 200 OK\r\n".encodeToByteArray())
         output.write("Content-Type: $contentType\r\n".encodeToByteArray())
         output.write("Content-Length: ${asset.length}\r\n".encodeToByteArray())
-        output.write("Connection: close\r\n".encodeToByteArray())
+        output.write("Connection: ${if (keepAlive) "keep-alive" else "close"}\r\n".encodeToByteArray())
+        if (keepAlive) {
+            output.write("Keep-Alive: timeout=15, max=256\r\n".encodeToByteArray())
+        }
         output.write("\r\n".encodeToByteArray())
         if (!method.equals("HEAD", ignoreCase = true)) {
             asset.openStream().use { input ->
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(COPY_BUFFER_SIZE)
                 while (true) {
                     val read = input.read(buffer)
                     if (read <= 0) break
@@ -316,13 +332,29 @@ class LocalAssetProxyServer(
         return headers
     }
 
-    private fun writeSimpleResponse(output: BufferedOutputStream, code: Int, message: String) {
-        output.write("HTTP/1.1 $code $message\r\nContent-Length: 0\r\n\r\n".encodeToByteArray())
+    private fun shouldKeepAlive(httpVersion: String, headers: Map<String, String>): Boolean {
+        val connection = headers.entries
+            .firstOrNull { it.key.equals("Connection", ignoreCase = true) }
+            ?.value
+            ?.lowercase()
+        return when {
+            connection == "close" -> false
+            connection == "keep-alive" -> true
+            else -> httpVersion.equals("HTTP/1.1", ignoreCase = true)
+        }
+    }
+
+    private fun writeSimpleResponse(output: BufferedOutputStream, code: Int, message: String, close: Boolean) {
+        output.write(
+            "HTTP/1.1 $code $message\r\nContent-Length: 0\r\nConnection: ${if (close) "close" else "keep-alive"}\r\n\r\n"
+                .encodeToByteArray()
+        )
         output.flush()
     }
 
     companion object {
         private const val SHA1_HEX_LENGTH = 40
+        private const val COPY_BUFFER_SIZE = 256 * 1024
     }
 }
 
