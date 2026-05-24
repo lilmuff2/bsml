@@ -189,7 +189,6 @@ class MainActivity : ComponentActivity() {
                 if (LatestFingerprintStore.readStoredClientHelloHash(filesDir).isNullOrBlank()) {
                     LatestFingerprintRepository.fetchLatest(this@MainActivity)
                 }
-                ModFilesRepository.prepareFiles(this@MainActivity)
                 Toast.makeText(this@MainActivity, getString(R.string.toast_mod_imported_from_file), Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this@MainActivity, getString(R.string.toast_invalid_mod_archive), Toast.LENGTH_SHORT).show()
@@ -384,7 +383,6 @@ private fun MainScreen() {
                     if (LatestFingerprintStore.readStoredClientHelloHash(context.filesDir).isNullOrBlank()) {
                         LatestFingerprintRepository.fetchLatest(context)
                     }
-                    ModFilesRepository.prepareFiles(context)
                     Toast.makeText(context, modImportedToast, Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, invalidModArchiveToast, Toast.LENGTH_SHORT).show()
