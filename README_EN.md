@@ -1,5 +1,7 @@
 # BSML (Brawl Stars Mod Loader)
 
+[Download the latest version](https://github.com/lilmuff2/bsml/releases/latest)
+
 <p align="center">
   <img src="menu.png" alt="BSML app screenshot" width="260"/>
 </p>
