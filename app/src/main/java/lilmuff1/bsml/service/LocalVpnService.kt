@@ -207,7 +207,7 @@ class LocalVpnService : VpnService() {
                 val descriptor = vpnInterface
                 if (descriptor == null) {
                     debugLog("Builder.establish() returned null")
-                    VpnLogRepository.setStatus("VPN establish failed")
+                    VpnLogRepository.notifyVpnStartBlocked("Builder.establish() returned null")
                     stopVpn()
                     return@thread
                 }

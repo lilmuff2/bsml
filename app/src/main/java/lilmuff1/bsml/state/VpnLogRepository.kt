@@ -117,6 +117,9 @@ object VpnLogRepository {
     private val _appLanguage = MutableStateFlow("system")
     val appLanguage = _appLanguage.asStateFlow()
 
+    private val _vpnStartBlockedSignal = MutableStateFlow(0)
+    val vpnStartBlockedSignal = _vpnStartBlockedSignal.asStateFlow()
+
     fun initialize(context: Context) {
         if (preferencesLoaded) return
         synchronized(this) {
@@ -171,6 +174,12 @@ object VpnLogRepository {
     }
 
     fun isVpnRunningNow(): Boolean = _isRunning.value
+
+    fun notifyVpnStartBlocked(reason: String) {
+        setStatus("VPN start blocked")
+        log("VPN start blocked: $reason")
+        _vpnStartBlockedSignal.value = _vpnStartBlockedSignal.value + 1
+    }
 
     fun setAssetProxyRunning(isRunning: Boolean) {
         _isAssetProxyRunning.value = isRunning

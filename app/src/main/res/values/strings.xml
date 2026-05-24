@@ -35,13 +35,12 @@
     <string name="button_done">Done</string>
     <string name="button_cancel">Cancel</string>
     <string name="button_continue">Continue</string>
-    <string name="button_select_mod_folder">Select mod</string>
-    <string name="button_clear_mod_folder">Clear mod</string>
+    <string name="button_download_update">Download</string>
+    <string name="button_skip_update">Skip</string>
     <string name="button_import_mod">Import mod</string>
     <string name="button_clear">Clear</string>
     <string name="button_select_original_assets_folder">Select source</string>
     <string name="button_export_logs">Export BSMLLocalVpn logs</string>
-    <string name="label_mod_folder">Mod</string>
     <string name="label_original_assets_folder">Original files folder</string>
     <string name="title_original_assets">Original Files</string>
     <string name="title_settings">Settings</string>
@@ -56,6 +55,9 @@
     <string name="title_manual_launch_needed">Launch game manually</string>
     <string name="title_reinstall_after_delete_warning">Game will re-download everything</string>
     <string name="title_delete_imported_mod_confirm">Delete mod?</string>
+    <string name="title_vpn_start_blocked">VPN did not start</string>
+    <string name="title_update_available">Update available</string>
+    <string name="title_update_required">Update required</string>
     <string name="guidance_step_select_mod">Import mod and wait for files preparation</string>
     <string name="guidance_step_action">Press install or delete mod</string>
     <string name="guidance_step_auto_launch">The game will launch automatically. Wait until you enter the menu. For large mods, this can take a noticeable amount of time</string>
@@ -67,9 +69,11 @@
     <string name="message_delete_imported_mod_confirm">The imported mod and prepared files will be cleared.</string>
     <string name="message_restart_game_to_remove_mods">You need to restart the game to remove mods</string>
     <string name="message_refresh_files_before_install">Please return to mod loader and refresh files</string>
+    <string name="message_vpn_start_blocked">Android blocked BSML from starting VPN. This usually happens when another VPN app has Always-on VPN enabled. Open Android VPN settings, disable Always-on VPN for the other app, then try again.</string>
+    <string name="message_update_available">Version %1$s is available.</string>
+    <string name="message_update_required">Version %1$s is required to continue.</string>
     <string name="label_latest_fingerprint">Latest fingerprint</string>
     <string name="label_latest_game_server">Latest game server</string>
-    <string name="value_mod_folder_not_selected">Not selected</string>
     <string name="value_latest_fingerprint_not_loaded">Not retrieved</string>
     <string name="value_latest_game_server_not_loaded">Not saved</string>
     <string name="status_mod_preparing">Preparing files</string>
@@ -77,8 +81,6 @@
     <string name="status_mod_empty">No files in the mod</string>
     <string name="status_mod_not_prepared">Files not prepared yet</string>
     <string name="status_mod_error_prefix">Preparation error:</string>
-    <string name="prepare_stage_scanning">Scanning files</string>
-    <string name="prepare_stage_hashing">Hashing files</string>
     <string name="prepare_stage_archive">Reading archive</string>
     <string name="prepare_stage_csv">Patching CSV</string>
     <string name="prepare_stage_original_assets">Preparing source files</string>
@@ -89,6 +91,7 @@
     <string name="toast_invalid_mod_archive">The selected file is not a valid nbassets mod</string>
     <string name="toast_feature_conflict">%1$s conflicts with %2$s</string>
     <string name="toast_mod_imported_from_file">Mod imported</string>
+    <string name="toast_update_open_failed">Could not open update link</string>
     <string name="toast_mod_unverified_signature">Unverified mod and may not work: archive is not signed with correct signature</string>
     <string name="warning_mod_unverified_signature">Unverified mod and may not work</string>
     <string name="warning_mod_old_game_version">Mod is for an older version of the game (%1$d), current version: %2$d</string>

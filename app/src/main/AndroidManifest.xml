@@ -25,6 +25,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.BSML">
         <activity
             android:name=".ui.MainActivity"
@@ -43,8 +44,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
 
-                <data android:scheme="content" />
-                <data android:scheme="file" />
+                <data
+                    android:scheme="content"
+                    tools:ignore="AppLinkUrlError" />
+                <data
+                    android:scheme="file"
+                    tools:ignore="AppLinkUrlError" />
                 <data android:mimeType="application/zip" />
                 <data android:mimeType="application/java-archive" />
                 <data android:mimeType="application/octet-stream" />

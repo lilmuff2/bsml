@@ -31,13 +31,27 @@ class NbAssetsCompiler(
     }
 
     fun compile(archive: File, outputDir: File, clearOutput: Boolean = true): List<PreparedModFile> {
+        if (archive.isDirectory) {
+            return compile(archive, outputDir, clearOutput, zip = null)
+        }
+        ZipFile(archive).use { zip ->
+            return compile(archive, outputDir, clearOutput, zip)
+        }
+    }
+
+    private fun compile(
+        archive: File,
+        outputDir: File,
+        clearOutput: Boolean,
+        zip: ZipFile?
+    ): List<PreparedModFile> {
         val startedAt = System.nanoTime()
         onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_ARCHIVE, 0, 0)
         VpnLogRepository.log("NBASSETS prepare start file=${archive.name} clearOutput=$clearOutput")
         if (clearOutput && outputDir.exists()) outputDir.deleteRecursively()
         outputDir.mkdirs()
 
-        val contentJson = NbAssetsArchiveReader.readRootContentJson(archive)
+        val contentJson = JSONObject(readArchiveBytes(archive, ROOT_CONTENT_JSON, zip).decodeToString())
         val provider = OriginalAssetProvider(context, outputDir)
         val contentParts = buildContentParts(contentJson)
         val activePatchFiles = contentParts.flatMap { patchFilePaths(it.json) }.toSet()
@@ -57,13 +71,13 @@ class NbAssetsCompiler(
                 mergeTables(patchJson, part.json)
             } else {
                 partPatchFiles.forEach { patchPath ->
-                    val patch = JSONObject(readArchiveBytes(archive, patchPath).decodeToString())
+                    val patch = JSONObject(readArchiveBytes(archive, patchPath, zip).decodeToString())
                     mergeTables(patchJson, patch)
                 }
             }
         }
 
-        val archiveFiles = listArchiveFiles(archive)
+        val archiveFiles = listArchiveFiles(archive, zip)
         var scannedFiles = 0
         archiveFiles.forEach { path ->
             scannedFiles++
@@ -81,7 +95,7 @@ class NbAssetsCompiler(
             } else {
                 val output = File(outputDir, assetPath)
                 output.parentFile?.mkdirs()
-                val bytes = readArchiveBytes(archive, path)
+                val bytes = readArchiveBytes(archive, path, zip)
                 output.writeBytes(bytes)
                 PreparedModFile(
                     path = assetPath,
@@ -102,14 +116,14 @@ class NbAssetsCompiler(
         lastMergedPatchJson = mergedPatchJson
         lastMergedPatchJsonFile(context).writeText(mergedPatchJson)
         VpnLogRepository.log("NBASSETS prepare assets=$assetCount patches=${activePatchFiles.size} parts=${contentParts.size} file=${archive.name}")
-        val tableNames = patchJson.keysList().sorted()
-        tableNames
+        val tablePatches = patchJson.keysList()
             .sorted()
-            .forEachIndexed { tableIndex, tableName ->
-                onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex, tableNames.size)
+            .mapNotNull { tableName -> patchJson.optJSONObject(tableName)?.let { tableName to it } }
+        tablePatches
+            .forEachIndexed { tableIndex, (tableName, patch) ->
+                onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex, tablePatches.size)
                 val tableStartedAt = System.nanoTime()
                 runCatching {
-                    val patch = patchJson.optJSONObject(tableName) ?: return@forEachIndexed
                     val original = provider.resolveCsv(tableName)
                     val table = CsvTable.load(original.bytes)
                     val resolvedPatch = CsvPatchApplier.resolveWildcards(patch, table)
@@ -125,7 +139,7 @@ class NbAssetsCompiler(
                         lastModified = output.lastModified()
                     )
                     csvCount++
-                    onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex + 1, tableNames.size)
+                    onStage(lilmuff1.bsml.state.ModFilesRepository.STAGE_CSV, tableIndex + 1, tablePatches.size)
                     VpnLogRepository.log("NBASSETS csv table=$tableName path=${original.path} ms=${elapsedMs(tableStartedAt)}")
                 }.getOrElse { error ->
                     VpnLogRepository.log(
@@ -178,28 +192,34 @@ class NbAssetsCompiler(
         return path.replace('\\', '/').trimStart('/')
     }
 
-    private fun listArchiveFiles(source: File): List<String> {
+    private fun listArchiveFiles(source: File, zip: ZipFile?): List<String> {
         if (source.isDirectory) {
             return source.walkTopDown()
                 .filter { it.isFile }
                 .map { it.relativeTo(source).invariantSeparatorsPath }
                 .toList()
         }
-        ZipFile(source).use { zip ->
-            return zip.entries().asSequence()
+        val archive = zip ?: ZipFile(source)
+        return try {
+            archive.entries().asSequence()
                 .filterNot { it.isDirectory }
                 .map { it.name }
                 .toList()
+        } finally {
+            if (zip == null) archive.close()
         }
     }
 
-    private fun readArchiveBytes(source: File, path: String): ByteArray {
+    private fun readArchiveBytes(source: File, path: String, zip: ZipFile?): ByteArray {
         if (source.isDirectory) {
             return File(source, path).readBytes()
         }
-        ZipFile(source).use { zip ->
-            val entry = zip.getEntry(path) ?: error("file not found: $path")
-            return zip.getInputStream(entry).use { it.readBytes() }
+        val archive = zip ?: ZipFile(source)
+        return try {
+            val entry = archive.getEntry(path) ?: error("file not found: $path")
+            archive.getInputStream(entry).use { it.readBytes() }
+        } finally {
+            if (zip == null) archive.close()
         }
     }
 

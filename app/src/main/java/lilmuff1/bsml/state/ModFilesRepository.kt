@@ -1,9 +1,7 @@
 package lilmuff1.bsml.state
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
 import java.io.BufferedInputStream
 import java.io.File
 import java.security.MessageDigest
@@ -21,13 +19,6 @@ import lilmuff1.bsml.modpatch.NbAssetsCompiler
 import lilmuff1.bsml.service.LoginFailedRewritePrewarmer
 import org.json.JSONArray
 import org.json.JSONObject
-
-data class ModFileEntry(
-    val path: String,
-    val uri: Uri,
-    val size: Long,
-    val lastModified: Long
-)
 
 data class PreparedModFile(
     val path: String,
@@ -51,15 +42,11 @@ data class ModPreparationState(
 }
 
 object ModFilesRepository {
-    const val STAGE_SCANNING = "scanning"
-    const val STAGE_HASHING = "hashing"
     const val STAGE_ARCHIVE = "archive"
     const val STAGE_CSV = "csv"
     const val STAGE_ORIGINAL_ASSETS = "original_assets"
     const val STAGE_SAVING = "saving"
 
-    private const val PREFS_NAME = "mod_files_repository"
-    private const val KEY_TREE_URI = "tree_uri"
     private const val PREPARED_INDEX_FILE = "prepared_mod_index.json"
     private const val PREPARED_FILES_DIR = "prepared_mod_files"
     private val prepareDispatcher = Dispatchers.IO.limitedParallelism(PREPARE_FILE_PARALLELISM)
@@ -72,33 +59,6 @@ object ModFilesRepository {
     @Volatile
     private var preparedStateSignature: String = ""
 
-    fun getTreeUri(context: Context): Uri? {
-        val raw = prefs(context).getString(KEY_TREE_URI, null) ?: return null
-        return runCatching { Uri.parse(raw) }.getOrNull()
-    }
-
-    fun setTreeUri(context: Context, uri: Uri?) {
-        if (uri == null) {
-            getTreeUri(context)?.let { previousUri ->
-                runCatching {
-                    context.contentResolver.releasePersistableUriPermission(
-                        previousUri,
-                        IntentFlags.readWritePersistableFlags
-                    )
-                }
-            }
-        }
-        val editor = prefs(context).edit()
-        if (uri == null) {
-            editor.remove(KEY_TREE_URI)
-        } else {
-            editor.putString(KEY_TREE_URI, uri.toString())
-        }
-        editor.commit()
-        clearPreparedFiles(context)
-        refreshState(context)
-    }
-
     fun refreshState(context: Context) {
         ImportedModRepository.refreshState(context)
         refreshPreparedStateFromImportedMod(context)
@@ -106,7 +66,9 @@ object ModFilesRepository {
 
     fun refreshPreparedStateFromImportedMod(context: Context) {
         val imported = ImportedModRepository.state.value
-        val folderName = imported.metadata?.title ?: imported.fileName ?: getDisplayName(context)
+        val folderName = imported.metadata?.title
+            ?: imported.fileName
+            ?: OriginalAssetsRepository.state.value.folderName
         val prepared = listPreparedFiles(context)
         _preparation.value = ModPreparationState(
             folderName = folderName,
@@ -116,18 +78,6 @@ object ModFilesRepository {
             isReady = folderName != null && prepared.isNotEmpty(),
             error = null
         )
-    }
-
-    fun getDisplayName(context: Context): String? {
-        val root = getRoot(context) ?: return null
-        return root.name ?: getTreeUri(context)?.lastPathSegment
-    }
-
-    fun listFiles(context: Context): List<ModFileEntry> {
-        val root = getRoot(context) ?: return emptyList()
-        val result = ArrayList<ModFileEntry>()
-        collectFiles(root, "", result)
-        return result.sortedBy { it.path }
     }
 
     suspend fun prepareFiles(context: Context): Boolean = prepareMutex.withLock {
@@ -156,122 +106,9 @@ object ModFilesRepository {
                 return@withContext prepareOriginalAssetsOnly(context)
             }
 
-            val folderName = getDisplayName(context)
-            if (folderName == null) {
-                _preparation.value = ModPreparationState(error = "folder_not_selected")
-                VpnLogRepository.log("PREPARE abort folder_not_selected")
-                return@withContext false
-            }
-
-            _preparation.value = ModPreparationState(
-                folderName = folderName,
-                isPreparing = true,
-                stage = STAGE_SCANNING,
-                preparedCount = 0,
-                totalCount = 0,
-                isReady = false,
-                error = null
-            )
-
-            val sourceFiles = listFilesParallel(context)
-            val existingPreparedList = listPreparedFiles(context)
-            if (matchesSnapshot(existingPreparedList, sourceFiles)) {
-                _preparation.value = ModPreparationState(
-                    folderName = folderName,
-                    isPreparing = false,
-                    preparedCount = existingPreparedList.size,
-                    totalCount = existingPreparedList.size,
-                    isReady = existingPreparedList.isNotEmpty(),
-                    error = null
-                )
-                VpnLogRepository.log("PREPARE snapshot matched count=${existingPreparedList.size} ms=${elapsedMs(startedAt)}")
-                return@withContext existingPreparedList.isNotEmpty()
-            }
-
-            val existingPrepared = existingPreparedList.associateBy { it.path }
-            _preparation.value = ModPreparationState(
-                folderName = folderName,
-                isPreparing = true,
-                stage = STAGE_HASHING,
-                preparedCount = 0,
-                totalCount = sourceFiles.size,
-                isReady = false,
-                error = null
-            )
-
-            val completedCount = AtomicInteger(0)
-            val preparedFiles = coroutineScope {
-                sourceFiles.map { file ->
-                    async(prepareDispatcher) {
-                        val cached = existingPrepared[file.path]
-                        val sha = if (cached != null && cached.matches(file)) {
-                            cached.sha
-                        } else {
-                            runCatching {
-                                context.contentResolver.openInputStream(file.uri)?.use { input ->
-                                    sha1Hex(input)
-                                }
-                            }.getOrNull()
-                        }
-                        val completed = completedCount.incrementAndGet()
-                        _preparation.value = ModPreparationState(
-                            folderName = folderName,
-                            isPreparing = true,
-                            stage = STAGE_HASHING,
-                            preparedCount = completed,
-                            totalCount = sourceFiles.size,
-                            isReady = false,
-                            error = null
-                        )
-                        if (sha == null) {
-                            null
-                        } else {
-                            PreparedModFile(
-                                path = file.path,
-                                sha = sha,
-                                uri = file.uri.toString(),
-                                size = file.size,
-                                lastModified = file.lastModified
-                            )
-                        }
-                    }
-                }.awaitAll()
-            }
-            val failedIndex = preparedFiles.indexOfFirst { it == null }
-            if (failedIndex >= 0) {
-                _preparation.value = ModPreparationState(
-                    folderName = folderName,
-                    isPreparing = false,
-                    preparedCount = failedIndex,
-                    totalCount = sourceFiles.size,
-                    isReady = false,
-                    error = sourceFiles[failedIndex].path
-                )
-                VpnLogRepository.log("PREPARE failed path=${sourceFiles[failedIndex].path} ms=${elapsedMs(startedAt)}")
-                return@withContext false
-            }
-
-            writePreparedIndex(context, preparedFiles.filterNotNull())
-            _preparation.value = ModPreparationState(
-                folderName = folderName,
-                isPreparing = true,
-                stage = STAGE_SAVING,
-                preparedCount = preparedFiles.size,
-                totalCount = preparedFiles.size,
-                isReady = false,
-                error = null
-            )
-            _preparation.value = ModPreparationState(
-                folderName = folderName,
-                isPreparing = false,
-                preparedCount = preparedFiles.size,
-                totalCount = preparedFiles.size,
-                isReady = true,
-                error = null
-            )
-            VpnLogRepository.log("PREPARE done files=${preparedFiles.size} ms=${elapsedMs(startedAt)}")
-            LoginFailedRewritePrewarmer.prewarm(context)
-            true
+            _preparation.value = ModPreparationState(error = "folder_not_selected")
+            VpnLogRepository.log("PREPARE abort folder_not_selected")
+            false
         }
     }
 
@@ -346,11 +183,6 @@ object ModFilesRepository {
         } else {
             context.contentResolver.openInputStream(uri)
         }
-    }
-
-    fun takePersistablePermission(context: Context, uri: Uri) {
-        val flags = IntentFlags.readWritePersistableFlags
-        context.contentResolver.takePersistableUriPermission(uri, flags)
     }
 
     fun getPreparedStateSignature(context: Context): String {
@@ -642,60 +474,6 @@ object ModFilesRepository {
         preparedStateSignature = buildPreparedStateSignature(files)
     }
 
-    private fun getRoot(context: Context): DocumentFile? {
-        val uri = getTreeUri(context) ?: return null
-        return DocumentFile.fromTreeUri(context, uri)?.takeIf { it.exists() && it.isDirectory }
-    }
-
-    private suspend fun listFilesParallel(context: Context): List<ModFileEntry> {
-        val root = getRoot(context) ?: return emptyList()
-        return collectFilesParallel(root, "").sortedBy { it.path }
-    }
-
-    private suspend fun collectFilesParallel(
-        directory: DocumentFile,
-        prefix: String
-    ): List<ModFileEntry> = coroutineScope {
-        val files = withContext(prepareDispatcher) { directory.listFiles().toList() }
-        val directFiles = ArrayList<ModFileEntry>()
-        val childJobs = files.mapNotNull { file ->
-            val name = file.name ?: return@mapNotNull null
-            val path = if (prefix.isEmpty()) name else "$prefix/$name"
-            when {
-                file.isDirectory -> async(prepareDispatcher) {
-                    collectFilesParallel(file, path)
-                }
-                file.isFile -> {
-                    directFiles += ModFileEntry(
-                        path = normalizePath(path),
-                        uri = file.uri,
-                        size = file.length(),
-                        lastModified = file.lastModified()
-                    )
-                    null
-                }
-                else -> null
-            }
-        }
-        directFiles + childJobs.awaitAll().flatten()
-    }
-
-    private fun collectFiles(directory: DocumentFile, prefix: String, result: MutableList<ModFileEntry>) {
-        directory.listFiles().forEach { file ->
-            val name = file.name ?: return@forEach
-            val path = if (prefix.isEmpty()) name else "$prefix/$name"
-            when {
-                file.isDirectory -> collectFiles(file, path, result)
-                file.isFile -> result += ModFileEntry(
-                    path = normalizePath(path),
-                    uri = file.uri,
-                    size = file.length(),
-                    lastModified = file.lastModified()
-                )
-            }
-        }
-    }
-
     private fun sha1Hex(input: java.io.InputStream): String {
         val digest = MessageDigest.getInstance("SHA-1")
         BufferedInputStream(input, COPY_BUFFER_SIZE).use { bufferedInput ->
@@ -716,9 +494,6 @@ object ModFilesRepository {
             .replace(" ", "")
     }
 
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
     private fun buildPreparedStateSignature(files: List<PreparedModFile>): String {
         if (files.isEmpty()) return ""
         val digest = MessageDigest.getInstance("SHA-1")
@@ -736,29 +511,6 @@ object ModFilesRepository {
         }
         return digest.digest().joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
     }
-}
-
-private fun PreparedModFile.matches(file: ModFileEntry): Boolean {
-    return path == file.path &&
-        uri == file.uri.toString() &&
-        size == file.size &&
-        lastModified == file.lastModified
-}
-
-private fun matchesSnapshot(
-    prepared: List<PreparedModFile>,
-    files: List<ModFileEntry>
-): Boolean {
-    if (prepared.size != files.size) return false
-    return prepared.zip(files).all { (preparedFile, file) ->
-        preparedFile.matches(file)
-    }
-}
-
-private object IntentFlags {
-    val readWritePersistableFlags: Int =
-        Intent.FLAG_GRANT_READ_URI_PERMISSION or
-            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
 }
 
 private const val COPY_BUFFER_SIZE = 256 * 1024

@@ -35,13 +35,12 @@
     <string name="button_done">Готово</string>
     <string name="button_cancel">Отмена</string>
     <string name="button_continue">Продолжить</string>
-    <string name="button_select_mod_folder">Выбрать мод</string>
-    <string name="button_clear_mod_folder">Очистить мод</string>
+    <string name="button_download_update">Скачать</string>
+    <string name="button_skip_update">Пропустить</string>
     <string name="button_import_mod">Импортировать мод</string>
     <string name="button_clear">Очистить</string>
     <string name="button_select_original_assets_folder">Выбрать источник</string>
     <string name="button_export_logs">Экспорт логов BSMLLocalVpn</string>
-    <string name="label_mod_folder">Мод</string>
     <string name="label_original_assets_folder">Папка оригинальных файлов</string>
     <string name="title_original_assets">Оригинальные файлы</string>
     <string name="title_settings">Настройки</string>
@@ -56,6 +55,9 @@
     <string name="title_manual_launch_needed">Запусти игру вручную</string>
     <string name="title_reinstall_after_delete_warning">Игра скачает всё заново</string>
     <string name="title_delete_imported_mod_confirm">Удалить мод?</string>
+    <string name="title_vpn_start_blocked">VPN не запустился</string>
+    <string name="title_update_available">Доступно обновление</string>
+    <string name="title_update_required">Требуется обновление</string>
     <string name="guidance_step_select_mod">Импортируй мод и дождись подготовки файлов</string>
     <string name="guidance_step_action">Нажми установить или удалить мод</string>
     <string name="guidance_step_auto_launch">Игра запустится автоматически, дождись входа в меню. При большом моде это может занять заметное время</string>
@@ -67,9 +69,11 @@
     <string name="message_delete_imported_mod_confirm">Импортированный мод и подготовленные файлы будут очищены.</string>
     <string name="message_restart_game_to_remove_mods">Вам необходимо перезапустить игру чтобы удалить моды</string>
     <string name="message_refresh_files_before_install">Вернитесь в загрузчик модов и обновите файлы</string>
+    <string name="message_vpn_start_blocked">Android заблокировал запуск VPN для BSML. Обычно это происходит, если у другого VPN-приложения включён режим «Постоянный VPN». Откройте настройки VPN в Android, выключите «Постоянный VPN» у другого приложения и попробуйте снова.</string>
+    <string name="message_update_available">Доступна версия %1$s.</string>
+    <string name="message_update_required">Для продолжения нужна версия %1$s.</string>
     <string name="label_latest_fingerprint">Последний fingerprint</string>
     <string name="label_latest_game_server">Последний игровой сервер</string>
-    <string name="value_mod_folder_not_selected">Не выбран</string>
     <string name="value_latest_fingerprint_not_loaded">Не получен</string>
     <string name="value_latest_game_server_not_loaded">Не сохранен</string>
     <string name="status_mod_preparing">Подготовка файлов</string>
@@ -77,8 +81,6 @@
     <string name="status_mod_empty">В моде нет файлов</string>
     <string name="status_mod_not_prepared">Файлы еще не подготовлены</string>
     <string name="status_mod_error_prefix">Ошибка подготовки:</string>
-    <string name="prepare_stage_scanning">Поиск файлов</string>
-    <string name="prepare_stage_hashing">Подсчет хешей</string>
     <string name="prepare_stage_archive">Чтение архива</string>
     <string name="prepare_stage_csv">Патч CSV</string>
     <string name="prepare_stage_original_assets">Подготовка исходных файлов</string>
@@ -89,6 +91,7 @@
     <string name="toast_invalid_mod_archive">Выбранный файл не является модом nbassets</string>
     <string name="toast_feature_conflict">%1$s конфликтует с %2$s</string>
     <string name="toast_mod_imported_from_file">Мод импортирован</string>
+    <string name="toast_update_open_failed">Не удалось открыть ссылку обновления</string>
     <string name="toast_mod_unverified_signature">Мод непроверенный и может не работать: архив не подписан нужной подписью</string>
     <string name="warning_mod_unverified_signature">Мод непроверенный и может не работать</string>
     <string name="warning_mod_old_game_version">Мод для старой версии игры (%1$d), текущая версия: %2$d</string>

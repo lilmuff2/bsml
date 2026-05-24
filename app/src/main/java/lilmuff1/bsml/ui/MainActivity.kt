@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
+import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
@@ -115,6 +116,8 @@ import lilmuff1.bsml.state.LatestFingerprintRepository
 import lilmuff1.bsml.state.LatestFingerprintStore
 import lilmuff1.bsml.state.ModFilesRepository
 import lilmuff1.bsml.state.OriginalAssetsRepository
+import lilmuff1.bsml.state.UpdateInfo
+import lilmuff1.bsml.state.UpdateRepository
 import lilmuff1.bsml.state.VpnLogRepository
 import lilmuff1.bsml.ui.theme.BSMLTheme
 import kotlinx.coroutines.Dispatchers
@@ -217,6 +220,8 @@ private fun MainScreen() {
     val importedModState by ImportedModRepository.state.collectAsState()
     val originalAssetsState by OriginalAssetsRepository.state.collectAsState()
     val latestFingerprintState by LatestFingerprintRepository.state.collectAsState()
+    val updateState by UpdateRepository.state.collectAsState()
+    val vpnStartBlockedSignal by VpnLogRepository.vpnStartBlockedSignal.collectAsState()
     val isRunning = isVpnRunning || isAssetProxyRunning
     val scope = rememberCoroutineScope()
     var pendingCleanupMode by remember { mutableStateOf(false) }
@@ -226,8 +231,10 @@ private fun MainScreen() {
     var pendingManualLaunchHint by remember { mutableStateOf<PendingManualLaunchHint?>(null) }
     var showReinstallAfterDeleteWarning by remember { mutableStateOf(false) }
     var showImportedModDeleteConfirm by remember { mutableStateOf(false) }
+    var showVpnStartBlockedDialog by remember { mutableStateOf(false) }
+    var handledVpnStartBlockedSignal by remember { mutableStateOf(0) }
+    var skippedUpdateVersionCode by remember { mutableStateOf<Long?>(null) }
     var autoPrepareRequestId by remember { mutableStateOf(0) }
-    val modFolderNotSelected = stringResource(R.string.value_mod_folder_not_selected)
     val stopLabel = stringResource(R.string.button_stop)
     val installLabel = stringResource(R.string.button_install_mod)
     val enableModLabel = stringResource(R.string.button_enable_mod)
@@ -238,8 +245,6 @@ private fun MainScreen() {
     val emptyLabel = stringResource(R.string.status_mod_not_prepared)
     val errorPrefix = stringResource(R.string.status_mod_error_prefix)
     val preparationStageLabel = when (preparation.stage) {
-        ModFilesRepository.STAGE_SCANNING -> stringResource(R.string.prepare_stage_scanning)
-        ModFilesRepository.STAGE_HASHING -> stringResource(R.string.prepare_stage_hashing)
         ModFilesRepository.STAGE_ARCHIVE -> stringResource(R.string.prepare_stage_archive)
         ModFilesRepository.STAGE_CSV -> stringResource(R.string.prepare_stage_csv)
         ModFilesRepository.STAGE_ORIGINAL_ASSETS -> stringResource(R.string.prepare_stage_original_assets)
@@ -264,16 +269,14 @@ private fun MainScreen() {
     val vpnPermissionDeniedLog = stringResource(R.string.log_vpn_permission_denied)
     val featureConflictToast = stringResource(R.string.toast_feature_conflict)
     val invalidModArchiveToast = stringResource(R.string.toast_invalid_mod_archive)
-    val hasImportedMods = importedModState.mods.isNotEmpty()
-    val directModFolderName = if (!hasImportedMods) {
-        ModFilesRepository.getDisplayName(context) ?: ModFilesRepository.getTreeUri(context)?.lastPathSegment
-    } else {
-        null
+    val modImportedToast = stringResource(R.string.toast_mod_imported_from_file)
+    val updateOpenFailedToast = stringResource(R.string.toast_update_open_failed)
+    val updateToShow = updateState.update?.takeIf { update ->
+        update.required || skippedUpdateVersionCode != update.versionCode
     }
+    val hasImportedMods = importedModState.mods.isNotEmpty()
     val hasOriginalAssetsFolder = originalAssetsState.folderName != null
-    val selectedModFolderName = preparation.folderName ?: directModFolderName
-    val hasDirectModFolder = !hasImportedMods && selectedModFolderName != null
-    val canPrepareModFiles = hasImportedMods || hasDirectModFolder || hasOriginalAssetsFolder
+    val canPrepareModFiles = hasImportedMods || hasOriginalAssetsFolder
     val isInstallEnabled = !isRunning &&
         !preparation.isPreparing &&
         preparation.isReady
@@ -289,7 +292,19 @@ private fun MainScreen() {
             OriginalAssetsRepository.refreshState(context)
             ModFilesRepository.refreshState(context)
             LatestFingerprintRepository.refreshState(context)
+        }
+        launch {
+            UpdateRepository.checkForUpdates(context)
+        }
+        launch {
             LatestFingerprintRepository.fetchLatest(context)
+        }
+    }
+
+    LaunchedEffect(vpnStartBlockedSignal) {
+        if (vpnStartBlockedSignal != 0 && vpnStartBlockedSignal != handledVpnStartBlockedSignal) {
+            handledVpnStartBlockedSignal = vpnStartBlockedSignal
+            showVpnStartBlockedDialog = true
         }
     }
 
@@ -310,11 +325,10 @@ private fun MainScreen() {
         autoPrepareFilesDelaySeconds,
         latestFingerprintState.savedRootSha,
         canPrepareModFiles,
-        hasDirectModFolder,
         isRunning
     ) {
         if (
-            (autoPrepareRequestId > 0 || hasDirectModFolder) &&
+            (autoPrepareRequestId > 0 || canPrepareModFiles) &&
             isAutoPrepareFilesEnabled &&
             canPrepareModFiles &&
             latestFingerprintState.savedRootSha != null &&
@@ -347,17 +361,7 @@ private fun MainScreen() {
         } else {
             VpnLogRepository.setStatus(vpnPermissionDeniedStatus)
             VpnLogRepository.log(vpnPermissionDeniedLog)
-        }
-    }
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            runCatching { ModFilesRepository.takePersistablePermission(context, uri) }
-            ModFilesRepository.setTreeUri(context, uri)
-            scope.launch {
-                ModFilesRepository.prepareFiles(context)
-            }
+            VpnLogRepository.notifyVpnStartBlocked("VPN permission result was not OK")
         }
     }
     val sourceFolderPickerLauncher = rememberLauncherForActivityResult(
@@ -381,7 +385,7 @@ private fun MainScreen() {
                         LatestFingerprintRepository.fetchLatest(context)
                     }
                     ModFilesRepository.prepareFiles(context)
-                    Toast.makeText(context, context.getString(R.string.toast_mod_imported_from_file), Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, modImportedToast, Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, invalidModArchiveToast, Toast.LENGTH_SHORT).show()
                     ModFilesRepository.refreshState(context)
@@ -404,7 +408,13 @@ private fun MainScreen() {
                 launchConfiguredGameWhenVpnReady(context)
             }
         } else {
-            vpnPermissionLauncher.launch(permissionIntent)
+            runCatching {
+                vpnPermissionLauncher.launch(permissionIntent)
+            }.getOrElse { error ->
+                VpnLogRepository.notifyVpnStartBlocked(
+                    "VPN permission activity failed: ${error::class.java.simpleName}"
+                )
+            }
         }
     }
 
@@ -586,6 +596,36 @@ private fun MainScreen() {
         )
     }
 
+    if (showVpnStartBlockedDialog) {
+        AlertDialog(
+            onDismissRequest = { showVpnStartBlockedDialog = false },
+            confirmButton = {
+                TextButton(onClick = { showVpnStartBlockedDialog = false }) {
+                    Text(stringResource(R.string.button_done))
+                }
+            },
+            title = { Text(stringResource(R.string.title_vpn_start_blocked)) },
+            text = {
+                Text(
+                    text = stringResource(R.string.message_vpn_start_blocked),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        )
+    }
+
+    updateToShow?.let { update ->
+        UpdateDialog(
+            update = update,
+            onDownload = {
+                openUpdateUrl(context, update.apkUrl, updateOpenFailedToast)
+            },
+            onSkip = {
+                skippedUpdateVersionCode = update.versionCode
+            }
+        )
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
@@ -705,13 +745,6 @@ private fun MainScreen() {
                                     CleanIndeterminateProgressIndicator(modifier = Modifier.fillMaxWidth())
                                 }
                             }
-                            if (hasDirectModFolder) {
-                                Text(
-                                    text = selectedModFolderName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
                         }
 
                         if (hasImportedMods) {
@@ -817,12 +850,6 @@ private fun MainScreen() {
                                 onClick = {
                                     if (isRunning) {
                                         stopMonitoring(context)
-                                    } else if (!preparation.isReady && hasDirectModFolder) {
-                                        scope.launch {
-                                            if (ModFilesRepository.prepareFiles(context)) {
-                                                requestInstallStart()
-                                            }
-                                        }
                                     } else {
                                         requestInstallStart()
                                     }
@@ -862,6 +889,67 @@ private data class PendingManualLaunchHint(
     val cleanupMode: Boolean,
     val cleanupReason: CleanupReasonSpec?
 )
+
+@Composable
+private fun UpdateDialog(
+    update: UpdateInfo,
+    onDownload: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val versionLabel = update.versionName ?: update.versionCode.toString()
+    AlertDialog(
+        onDismissRequest = {
+            if (!update.required) onSkip()
+        },
+        confirmButton = {
+            TextButton(onClick = onDownload) {
+                Text(stringResource(R.string.button_download_update))
+            }
+        },
+        dismissButton = if (update.required) {
+            null
+        } else {
+            {
+                TextButton(onClick = onSkip) {
+                    Text(stringResource(R.string.button_skip_update))
+                }
+            }
+        },
+        title = {
+            Text(
+                stringResource(
+                    if (update.required) {
+                        R.string.title_update_required
+                    } else {
+                        R.string.title_update_available
+                    }
+                )
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = stringResource(
+                        if (update.required) {
+                            R.string.message_update_required
+                        } else {
+                            R.string.message_update_available
+                        },
+                        versionLabel
+                    ),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                update.changelog?.takeIf { it.isNotBlank() }?.let { changelog ->
+                    Text(
+                        text = changelog,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    )
+}
 
 @Composable
 private fun StatusRow(
@@ -1889,6 +1977,17 @@ private fun startMonitoring(
             .putExtra(LocalVpnService.EXTRA_CLEANUP_REASON_CODE, cleanupReason?.code ?: -1)
             .putExtra(LocalVpnService.EXTRA_CLEANUP_REASON_NAME, cleanupReason?.name)
     )
+}
+
+private fun openUpdateUrl(context: Context, apkUrl: String, errorText: String) {
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }.getOrElse {
+        Toast.makeText(context, errorText, Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun stopMonitoring(context: Context) {
