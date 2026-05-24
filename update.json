@@ -1,0 +1,10 @@
+{
+  "versionCode": 21,
+  "versionName": "2.1",
+  "apkUrl": "https://github.com/lilmuff2/bsml/releases/latest",
+  "required": false,
+  "changelog": {
+    "ru": "Багфикс",
+    "en": "Bugfix"
+  }
+}
