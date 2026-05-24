@@ -25,7 +25,7 @@ data class UpdateState(
 )
 
 object UpdateRepository {
-    private const val UPDATE_MANIFEST_URL = "http://lilmuff1.xyz/bsml/update.json"
+    private const val UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lilmuff2/bsml/refs/heads/master/update.json"
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 8_000
 
